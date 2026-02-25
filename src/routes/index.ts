@@ -1,36 +1,40 @@
 import { Router } from "express";
-import { createAgent } from "../agents/agent.js";
-import { env } from "../config/env.js";
-import { HumanMessage, AIMessage } from "@langchain/core/messages";
+import { runAgent } from "../agent/index.js";
+import { AIMessage } from "@langchain/core/messages";
 import adminRoutes from "./admin.js";
+import automationsRouter from "./automations.js";
+import { authMiddleware, AuthRequest } from "../middleware/auth.js";
+import { runAutomations } from "../automations/engine.js";
 
 const router = Router();
-const agent = createAgent(env.GROQ_API_KEY);
 
-router.post("/chat", async (req, res) => {
+router.post("/chat", authMiddleware, async (req: AuthRequest, res) => {
   try {
-    const { message, adminId } = req.body as {
+    const { message, threadId } = req.body as {
       message?: string;
-      adminId?: string;
+      threadId?: string;
     };
+
+    if (!threadId) {
+      res.status(400).json({ success: false, error: "threadId is required" });
+      return;
+    }
+
+    const adminId = req.adminId!;
     const input = message ?? "Hello";
 
-    const result = await agent.invoke({
-      messages: [new HumanMessage(input)],
-      adminId,
-    });
+    // Run automations before the agent (threadId == mobile number)
+    await runAutomations(adminId, input, threadId);
 
-    // TEMP: log full message history for debugging
-    // eslint-disable-next-line no-console
-    console.log(JSON.stringify(result.messages, null, 2));
+    const result = await runAgent(adminId, input, threadId);
 
+    // Extract the final AI response text from the result messages
     const messages = result.messages ?? [];
     let finalContent = "";
 
     for (let i = messages.length - 1; i >= 0; i -= 1) {
       const msg = messages[i];
 
-      // Only consider AI messages / assistant responses
       const isAI =
         msg instanceof AIMessage ||
         (typeof (msg as any)._getType === "function" &&
@@ -44,7 +48,6 @@ router.post("/chat", async (req, res) => {
         Array.isArray((msg as any).tool_calls) &&
         (msg as any).tool_calls.length > 0;
 
-      // Skip intermediate tool call messages
       if (hasToolCalls) continue;
 
       if (typeof (msg as any).content === "string") {
@@ -56,10 +59,11 @@ router.post("/chat", async (req, res) => {
       }
     }
 
-    res.json({ response: finalContent });
+    res.json({ success: true, response: finalContent, threadId });
   } catch (err) {
     console.error(err);
     res.status(500).json({
+      success: false,
       error: err instanceof Error ? err.message : "Agent request failed",
     });
   }
@@ -69,7 +73,10 @@ router.get("/health", (_req, res) => {
   res.json({ status: "ok" });
 });
 
-// Register admin routes
-router.use("/admin", adminRoutes);
+// Admin management routes
+router.use("/admin", authMiddleware, adminRoutes);
+
+// Automations routes (auth applied at mount level)
+router.use("/automations", authMiddleware, automationsRouter);
 
 export default router;

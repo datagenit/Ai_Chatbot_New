@@ -77,3 +77,6 @@ const searchWeb = tool(
 
 export const tools = [getCurrentDatetime, searchKnowledgeBase, searchWeb];
 
+// Export individual tools for dynamic loading
+export { getCurrentDatetime, searchKnowledgeBase, searchWeb };
+
