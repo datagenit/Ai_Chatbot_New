@@ -5,10 +5,12 @@ import adminRoutes from "./admin.js";
 import automationsRouter from "./automations.js";
 import { authMiddleware, AuthRequest } from "../middleware/auth.js";
 import { runAutomations } from "../automations/engine.js";
+import UsageLog from "../models/UsageLog.js";
 
 const router = Router();
 
 router.post("/chat", authMiddleware, async (req: AuthRequest, res) => {
+  const requestStart = Date.now();
   try {
     const { message, threadId } = req.body as {
       message?: string;
@@ -62,6 +64,23 @@ router.post("/chat", authMiddleware, async (req: AuthRequest, res) => {
     res.json({ success: true, response: finalContent, threadId });
   } catch (err) {
     console.error(err);
+    const { message: _msg, threadId: _tid } = req.body as {
+      message?: string;
+      threadId?: string;
+    };
+    if (_tid) {
+      UsageLog.create({
+        adminId: req.adminId!,
+        threadId: _tid,
+        modelName: "llama-3.3-70b-versatile",
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        source: _tid.startsWith("admin-test") ? "test" : "whatsapp",
+        latencyMs: Date.now() - requestStart,
+        status: "error",
+      }).catch(() => {});
+    }
     res.status(500).json({
       success: false,
       error: err instanceof Error ? err.message : "Agent request failed",

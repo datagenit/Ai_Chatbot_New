@@ -7,6 +7,7 @@ import { ingest } from "../ingestion/ingest.js";
 import { deleteVectors } from "../ingestion/retriever.js";
 import AdminConfig from "../models/AdminConfig.js";
 import UploadedFile from "../models/UploadedFile.js";
+import UsageLog from "../models/UsageLog.js";
 import type { AuthRequest } from "../middleware/auth.js";
 import Conversation from "../models/Conversation.js";
 
@@ -389,5 +390,170 @@ router.get("/documents/:id/file", async (req: AuthRequest, res: Response) => {
   }
 });
 
+
+// ── GET /api/admin/usage ─────────────────────────────────────────────────────
+router.get("/usage", async (req: AuthRequest, res: Response) => {
+  try {
+    const adminId = req.adminId!;
+    const { from, to } = req.query as { from?: string; to?: string };
+
+    const dateFilter: Record<string, Date> = {};
+    if (from) dateFilter.$gte = new Date(from);
+    if (to) dateFilter.$lte = new Date(to);
+
+    const matchStage: Record<string, unknown> = { adminId };
+    if (Object.keys(dateFilter).length) matchStage.createdAt = dateFilter;
+
+    const [summaryResult, dailyResult] = await Promise.all([
+      UsageLog.aggregate([
+        { $match: matchStage },
+        {
+          $group: {
+            _id: null,
+            totalInputTokens: { $sum: "$inputTokens" },
+            totalOutputTokens: { $sum: "$outputTokens" },
+            totalTokens: { $sum: "$totalTokens" },
+            totalRequests: { $sum: 1 },
+            whatsappRequests: {
+              $sum: { $cond: [{ $eq: ["$source", "whatsapp"] }, 1, 0] },
+            },
+            testRequests: {
+              $sum: { $cond: [{ $eq: ["$source", "test"] }, 1, 0] },
+            },
+            errorRequests: {
+              $sum: { $cond: [{ $eq: ["$status", "error"] }, 1, 0] },
+            },
+            avgLatencyMs: { $avg: { $ifNull: ["$latencyMs", null] } },
+          },
+        },
+      ]),
+      UsageLog.aggregate([
+        { $match: matchStage },
+        {
+          $group: {
+            _id: {
+              $dateToString: { format: "%Y-%m-%d", date: "$createdAt" },
+            },
+            tokens: { $sum: "$totalTokens" },
+            requests: { $sum: 1 },
+            avgLatencyMs: { $avg: { $ifNull: ["$latencyMs", null] } },
+            errors: {
+              $sum: { $cond: [{ $eq: ["$status", "error"] }, 1, 0] },
+            },
+          },
+        },
+        { $sort: { _id: 1 } },
+        {
+          $project: {
+            _id: 0,
+            date: "$_id",
+            tokens: 1,
+            requests: 1,
+            avgLatencyMs: { $round: [{ $ifNull: ["$avgLatencyMs", 0] }, 0] },
+            errors: 1,
+          },
+        },
+      ]),
+    ]);
+
+    const summary = summaryResult[0]
+      ? {
+          totalInputTokens: summaryResult[0].totalInputTokens,
+          totalOutputTokens: summaryResult[0].totalOutputTokens,
+          totalTokens: summaryResult[0].totalTokens,
+          totalRequests: summaryResult[0].totalRequests,
+          whatsappRequests: summaryResult[0].whatsappRequests,
+          testRequests: summaryResult[0].testRequests,
+          errorRequests: summaryResult[0].errorRequests,
+          avgLatencyMs: Math.round(summaryResult[0].avgLatencyMs ?? 0),
+        }
+      : {
+          totalInputTokens: 0,
+          totalOutputTokens: 0,
+          totalTokens: 0,
+          totalRequests: 0,
+          whatsappRequests: 0,
+          testRequests: 0,
+          errorRequests: 0,
+          avgLatencyMs: 0,
+        };
+
+    res.json({ success: true, summary, daily: dailyResult });
+  } catch (err) {
+    console.error("GET /usage error:", err);
+    res.status(500).json({
+      success: false,
+      error: err instanceof Error ? err.message : "Failed to fetch usage",
+    });
+  }
+});
+
+// ── GET /api/admin/usage/top-threads ─────────────────────────────────────────
+router.get("/usage/top-threads", async (req: AuthRequest, res: Response) => {
+  try {
+    const adminId = req.adminId!;
+    const { from, to, limit: limitParam } = req.query as {
+      from?: string;
+      to?: string;
+      limit?: string;
+    };
+
+    const dateFilter: Record<string, Date> = {};
+    if (from) dateFilter.$gte = new Date(from);
+    if (to) dateFilter.$lte = new Date(to);
+
+    const matchStage: Record<string, unknown> = { adminId };
+    if (Object.keys(dateFilter).length) matchStage.createdAt = dateFilter;
+
+    const limitVal = Math.min(parseInt(limitParam ?? "10", 10) || 10, 50);
+
+    const data = await UsageLog.aggregate([
+      { $match: matchStage },
+      {
+        $group: {
+          _id: "$threadId",
+          tokens: { $sum: "$totalTokens" },
+          requests: { $sum: 1 },
+          avgLatencyMs: { $avg: { $ifNull: ["$latencyMs", null] } },
+          lastUsed: { $max: "$createdAt" },
+        },
+      },
+      { $sort: { tokens: -1 } },
+      { $limit: limitVal },
+      {
+        $project: {
+          _id: 0,
+          threadId: "$_id",
+          tokens: 1,
+          requests: 1,
+          avgLatencyMs: { $round: [{ $ifNull: ["$avgLatencyMs", 0] }, 0] },
+          lastUsed: 1,
+        },
+      },
+    ]);
+
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error("GET /usage/top-threads error:", err);
+    res.status(500).json({
+      success: false,
+      error: err instanceof Error ? err.message : "Failed to fetch top threads",
+    });
+  }
+});
+
+// ── DELETE /api/admin/usage ───────────────────────────────────────────────────
+router.delete("/usage", async (req: AuthRequest, res: Response) => {
+  try {
+    await UsageLog.deleteMany({ adminId: req.adminId });
+    res.json({ success: true, message: "Usage logs cleared" });
+  } catch (err) {
+    console.error("DELETE /usage error:", err);
+    res.status(500).json({
+      success: false,
+      error: err instanceof Error ? err.message : "Failed to clear usage logs",
+    });
+  }
+});
 
 export default router;

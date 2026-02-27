@@ -31,7 +31,7 @@ export async function retrieve(
     const pineconeIndex = pinecone.Index(env.PINECONE_INDEX_NAME);
 
     const vectorStore = await PineconeStore.fromExistingIndex(embeddings, {
-      pineconeIndex,
+      pineconeIndex: pineconeIndex as any,
       namespace,
     });
 

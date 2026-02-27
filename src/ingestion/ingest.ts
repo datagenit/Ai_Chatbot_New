@@ -51,10 +51,10 @@ export async function ingest(
 
   // Upsert into admin's namespace with deterministic IDs for later deletion
   await PineconeStore.fromDocuments(taggedChunks, embeddings, {
-    pineconeIndex,
+    pineconeIndex: pineconeIndex as any,
     namespace,
     ids: vectorIds,
-  });
+  } as any);
 
   return { chunks: chunks.length, vectorIds };
 }

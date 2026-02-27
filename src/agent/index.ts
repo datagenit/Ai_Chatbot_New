@@ -14,6 +14,7 @@ import { retrieve } from "../ingestion/retriever.js";
 import { getCurrentDatetime, searchWeb } from "../tools/tools.js";
 import AdminConfig from "../models/AdminConfig.js";
 import Conversation from "../models/Conversation.js";
+import UsageLog from "../models/UsageLog.js";
 import { env } from "../config/env.js";
 
 const AgentState = Annotation.Root({
@@ -53,22 +54,6 @@ export async function runAgent(adminId: string, message: string, threadId: strin
     toolsArray.push(getCurrentDatetime);
   }
 
-  if (config.tools.search_knowledge_base === true) {
-    const searchKnowledgeBase = tool(
-      async ({ query }) => {
-        return retrieve(query, adminId, config.kb.collectionName, config.kb.maxResults);
-      },
-      {
-        name: "search_knowledge_base",
-        description: "Search the internal knowledge base for relevant context.",
-        schema: z.object({
-          query: z.string().describe("Natural language search query."),
-        }),
-      }
-    );
-    toolsArray.push(searchKnowledgeBase);
-  }
-
   if (config.tools.search_web === true) {
     toolsArray.push(searchWeb);
   }
@@ -86,7 +71,7 @@ export async function runAgent(adminId: string, message: string, threadId: strin
     model: "llama-3.3-70b-versatile",
     temperature: 0,
   });
-  const llmWithTools = llm.bindTools(toolsArray);
+  const llmWithTools = toolsArray.length > 0 ? llm.bindTools(toolsArray) : llm;
 
   // ── LLM node — only node in graph, no separate retrieve node ─────────────
   async function llmNode(state: AgentStateType): Promise<Partial<AgentStateType>> {
@@ -122,24 +107,29 @@ export async function runAgent(adminId: string, message: string, threadId: strin
     .addNode("llm", llmNode)
     .addNode("tools", toolNode)
     .addEdge(START, "llm")
-    .addConditionalEdges("llm", shouldContinue)
+    .addConditionalEdges("llm", shouldContinue, {
+      tools: "tools",
+      [END]: END,
+    })
     .addEdge("tools", "llm");
 
   const compiledGraph = graph.compile();
 
   const systemPrompt = kbContext
-    ? `You are a helpful assistant. Use this knowledge base context to answer:\n\n${kbContext}`
+    ? `You are a helpful assistant.\nUse the following knowledge base context to answer the user's question.\nIf the context does not contain enough information, say so clearly.\n\n--- KNOWLEDGE BASE CONTEXT ---\n${kbContext}\n--- END CONTEXT ---\n\nAnswer directly and concisely. Do NOT call any search tools if the context above is sufficient.`
     : `You are a helpful assistant.`;
 
   // ── Invoke graph ──────────────────────────────────────────────────────────
+  const agentStart = Date.now();
   const result = await compiledGraph.invoke(
     {
       messages: [...historyMessages, new HumanMessage(message)],
       adminId,
       systemPrompt,
     },
-    { recursionLimit: 10 }
+    { recursionLimit: 25 }
   );
+  const latencyMs = Date.now() - agentStart;
 
   // ── Extract final AI response text ────────────────────────────────────────
   let aiResponseText = "";
@@ -160,6 +150,32 @@ export async function runAgent(adminId: string, message: string, threadId: strin
       aiResponseText = (msg as any).content.trim();
       break;
     }
+  }
+
+  // ── Fire-and-forget token usage logging ──────────────────────────────────
+  {
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let totalTokens = 0;
+    for (const msg of resultMessages) {
+      const usage = (msg as any).usage_metadata;
+      if (usage) {
+        inputTokens += usage.input_tokens ?? 0;
+        outputTokens += usage.output_tokens ?? 0;
+        totalTokens += usage.total_tokens ?? 0;
+      }
+    }
+    UsageLog.create({
+      adminId,
+      threadId,
+      modelName: "llama-3.3-70b-versatile",
+      inputTokens,
+      outputTokens,
+      totalTokens,
+      source: threadId.startsWith("admin-test") ? "test" : "whatsapp",
+      latencyMs,
+      status: "success",
+    }).catch((err) => console.error("[UsageLog] Failed to save usage:", err));
   }
 
   // ── Persist to MongoDB ────────────────────────────────────────────────────
