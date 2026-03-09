@@ -6,6 +6,7 @@ export interface IUploadedFile extends Document {
   filePath: string;
   chunks: number;
   vectorIds: string[];
+  content: string;
   uploadedAt: Date;
 }
 
@@ -15,6 +16,7 @@ const UploadedFileSchema = new Schema<IUploadedFile>({
   filePath: { type: String, required: true },
   chunks: { type: Number, required: true },
   vectorIds: { type: [String], default: [] },
+  content: { type: String, default: "" },
   uploadedAt: { type: Date, default: Date.now },
 });
 

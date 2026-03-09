@@ -3,7 +3,12 @@ import multer from "multer";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
-import { ingest } from "../ingestion/ingest.js";
+import { ingest, ingestText, ingestURL } from "../ingestion/ingest.js";
+import {
+  validateURL,
+  checkDuplicateSource,
+  checkAdminSourceLimit,
+} from "../ingestion/safeguards.js";
 import { deleteVectors } from "../ingestion/retriever.js";
 import AdminConfig from "../models/AdminConfig.js";
 import UploadedFile from "../models/UploadedFile.js";
@@ -63,12 +68,134 @@ router.post("/upload", upload.single("file"), async (req: AuthRequest, res: Resp
   }
 });
 
+// ── POST /api/admin/upload/text ─────────────────────────────────────────────
+router.post("/upload/text", async (req: AuthRequest, res: Response) => {
+  try {
+    const { content, sourceName } = req.body as {
+      content?: string;
+      sourceName?: string;
+    };
+
+    if (!content || !content.trim()) {
+      res.status(400).json({ success: false, error: "Content is required" });
+      return;
+    }
+
+    const adminId = req.adminId!;
+    const resolvedSourceName = sourceName?.trim() || `Text Entry ${Date.now()}`;
+    const textFilePath = `text-input-${resolvedSourceName}`;
+
+    const isDuplicate = await checkDuplicateSource(adminId, textFilePath);
+    if (isDuplicate) {
+      res.status(409).json({ success: false, error: "A text entry with this name already exists" });
+      return;
+    }
+
+    const limitReached = await checkAdminSourceLimit(adminId, "text");
+    if (limitReached) {
+      res.status(429).json({
+        success: false,
+        error: "Text source limit reached (max 25). Delete existing sources to add new ones.",
+      });
+      return;
+    }
+
+    const { chunks, vectorIds } = await ingestText(adminId, content.trim(), resolvedSourceName);
+
+    const savedDoc = await UploadedFile.create({
+      adminId,
+      originalName: resolvedSourceName,
+      filePath: textFilePath,
+      chunks,
+      vectorIds,
+      content,
+    });
+
+    res.json({
+      success: true,
+      message: `Successfully ingested ${chunks} chunks`,
+      chunks,
+      documentId: savedDoc._id,
+    });
+  } catch (err) {
+    console.error("Text upload error:", err);
+    res.status(500).json({
+      success: false,
+      error: err instanceof Error ? err.message : "Text ingestion failed",
+    });
+  }
+});
+
+// ── POST /api/admin/upload/url ──────────────────────────────────────────────
+router.post("/upload/url", async (req: AuthRequest, res: Response) => {
+  try {
+    const { url } = req.body as { url?: string };
+
+    if (!url || !url.trim()) {
+      res.status(400).json({ success: false, error: "URL is required" });
+      return;
+    }
+
+    const trimmedUrl = url.trim();
+    const adminId = req.adminId!;
+
+    const urlCheck = validateURL(trimmedUrl);
+    if (!urlCheck.valid) {
+      res.status(400).json({ success: false, error: urlCheck.reason });
+      return;
+    }
+
+    const isDuplicate = await checkDuplicateSource(adminId, trimmedUrl);
+    if (isDuplicate) {
+      res.status(409).json({
+        success: false,
+        error: "This URL has already been added to your knowledge base",
+      });
+      return;
+    }
+
+    const limitReached = await checkAdminSourceLimit(adminId, "url");
+    if (limitReached) {
+      res.status(429).json({
+        success: false,
+        error: "URL source limit reached (max 25). Delete existing sources to add new ones.",
+      });
+      return;
+    }
+
+    const result = await ingestURL(adminId, trimmedUrl);
+
+    const savedDoc = await UploadedFile.create({
+      adminId,
+      originalName: result.title,
+      filePath: trimmedUrl,
+      chunks: result.chunks,
+      vectorIds: result.vectorIds,
+      content: result.content,
+    });
+
+    res.json({
+      success: true,
+      message: `Successfully ingested ${result.chunks} chunks from ${result.title}`,
+      chunks: result.chunks,
+      title: result.title,
+      documentId: savedDoc._id,
+    });
+  } catch (err) {
+    console.error("URL upload error:", err);
+    res.status(500).json({
+      success: false,
+      error: err instanceof Error ? err.message : "URL ingestion failed",
+    });
+  }
+});
+
 // ── GET /api/admin/documents ────────────────────────────────────────────────
 router.get("/documents", async (req: AuthRequest, res: Response) => {
   try {
     const docs = await UploadedFile.find({ adminId: req.adminId })
       .sort({ uploadedAt: -1 })
-      .select("_id originalName chunks uploadedAt adminId");
+      .select("_id originalName chunks uploadedAt adminId filePath");
 
     res.json({ success: true, data: docs });
   } catch (err) {
@@ -84,7 +211,7 @@ router.get("/documents", async (req: AuthRequest, res: Response) => {
 router.get("/documents/:id", async (req: AuthRequest, res: Response) => {
   try {
     const doc = await UploadedFile.findOne({ _id: req.params.id, adminId: req.adminId }).select(
-      "_id originalName chunks uploadedAt"
+      "_id originalName chunks uploadedAt filePath content"
     );
 
     if (!doc) {
@@ -115,11 +242,15 @@ router.delete("/documents/:id", async (req: AuthRequest, res: Response) => {
 
     await deleteVectors(adminId, doc.vectorIds);
 
-    try {
-      fs.unlinkSync(doc.filePath);
-    } catch (fileErr) {
-      console.error(`[Upload] Could not delete file ${doc.filePath}:`, fileErr);
+    // Only attempt file deletion for actual PDF files
+    if (doc.filePath && !doc.filePath.startsWith('text-input') && !doc.filePath.startsWith('http')) {
+      try {
+        if (fs.existsSync(doc.filePath)) fs.unlinkSync(doc.filePath);
+      } catch (fileErr) {
+        console.warn(`[Upload] Could not delete file ${doc.filePath}:`, fileErr);
+      }
     }
+
 
     await doc.deleteOne();
 
@@ -136,12 +267,34 @@ router.delete("/documents/:id", async (req: AuthRequest, res: Response) => {
 // ── GET /api/admin/me ───────────────────────────────────────────────────────
 router.get("/me", async (req: AuthRequest, res: Response) => {
   try {
-    const config = await AdminConfig.findOne({ adminId: req.adminId });
+    const adminId = req.adminId!;
 
-    if (!config) {
-      res.status(404).json({ success: false, error: "Admin config not found" });
-      return;
-    }
+    const config = await AdminConfig.findOneAndUpdate(
+      { adminId },
+      {
+        $setOnInsert: {
+          adminId,
+          tools: {
+            get_current_datetime: true,
+            search_knowledge_base: true,
+            search_web: false,
+            create_ticket: false,
+          },
+          kb: {
+            collectionName: `kb_${adminId}`,
+            maxResults: 5,
+          },
+          conversationTtlDays: 30,
+          confirmBeforeTicket: false,
+          customSystemPrompt: '',
+          kbOnlyMode: false,
+        },
+      },
+      {
+        new: true,       // return the document after update
+        upsert: true,    // create if doesn't exist
+      }
+    );
 
     res.json({ success: true, data: config });
   } catch (err) {
@@ -192,6 +345,62 @@ router.post("/setup", async (req: AuthRequest, res: Response) => {
     res.status(500).json({
       success: false,
       error: err instanceof Error ? err.message : "Failed to create admin config",
+    });
+  }
+});
+
+// ── PATCH /api/admin/agent-prompt ────────────────────────────────────────────
+router.patch("/agent-prompt", async (req: AuthRequest, res: Response) => {
+  try {
+    const config = await AdminConfig.findOne({ adminId: req.adminId });
+    if (!config) {
+      res.status(404).json({ success: false, error: "Config not found" });
+      return;
+    }
+
+    if (typeof req.body.customSystemPrompt === "string") {
+      config.customSystemPrompt = req.body.customSystemPrompt;
+    }
+    if (typeof req.body.kbOnlyMode === "boolean") {
+      config.kbOnlyMode = req.body.kbOnlyMode;
+    }
+
+    await config.save();
+    res.json({ success: true });
+  } catch (err) {
+    console.error("PATCH /agent-prompt error:", err);
+    res.status(500).json({
+      success: false,
+      error: err instanceof Error ? err.message : "Failed to update agent prompt settings",
+    });
+  }
+});
+
+// ── PATCH /api/admin/ticket-settings ────────────────────────────────────────
+router.patch("/ticket-settings", async (req: AuthRequest, res: Response) => {
+  try {
+    const { confirmBeforeTicket } = req.body as { confirmBeforeTicket?: unknown };
+
+    if (typeof confirmBeforeTicket !== "boolean") {
+      res.status(400).json({ success: false, error: "confirmBeforeTicket must be a boolean" });
+      return;
+    }
+
+    const config = await AdminConfig.findOne({ adminId: req.adminId });
+    if (!config) {
+      res.status(404).json({ success: false, error: "Config not found" });
+      return;
+    }
+
+    config.confirmBeforeTicket = confirmBeforeTicket;
+    await config.save();
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("PATCH /ticket-settings error:", err);
+    res.status(500).json({
+      success: false,
+      error: err instanceof Error ? err.message : "Failed to update ticket settings",
     });
   }
 });
@@ -458,25 +667,25 @@ router.get("/usage", async (req: AuthRequest, res: Response) => {
 
     const summary = summaryResult[0]
       ? {
-          totalInputTokens: summaryResult[0].totalInputTokens,
-          totalOutputTokens: summaryResult[0].totalOutputTokens,
-          totalTokens: summaryResult[0].totalTokens,
-          totalRequests: summaryResult[0].totalRequests,
-          whatsappRequests: summaryResult[0].whatsappRequests,
-          testRequests: summaryResult[0].testRequests,
-          errorRequests: summaryResult[0].errorRequests,
-          avgLatencyMs: Math.round(summaryResult[0].avgLatencyMs ?? 0),
-        }
+        totalInputTokens: summaryResult[0].totalInputTokens,
+        totalOutputTokens: summaryResult[0].totalOutputTokens,
+        totalTokens: summaryResult[0].totalTokens,
+        totalRequests: summaryResult[0].totalRequests,
+        whatsappRequests: summaryResult[0].whatsappRequests,
+        testRequests: summaryResult[0].testRequests,
+        errorRequests: summaryResult[0].errorRequests,
+        avgLatencyMs: Math.round(summaryResult[0].avgLatencyMs ?? 0),
+      }
       : {
-          totalInputTokens: 0,
-          totalOutputTokens: 0,
-          totalTokens: 0,
-          totalRequests: 0,
-          whatsappRequests: 0,
-          testRequests: 0,
-          errorRequests: 0,
-          avgLatencyMs: 0,
-        };
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        totalTokens: 0,
+        totalRequests: 0,
+        whatsappRequests: 0,
+        testRequests: 0,
+        errorRequests: 0,
+        avgLatencyMs: 0,
+      };
 
     res.json({ success: true, summary, daily: dailyResult });
   } catch (err) {

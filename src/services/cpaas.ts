@@ -132,6 +132,74 @@ export async function assignAgent({
 
 // ── addLabel ──────────────────────────────────────────────────────────────────
 
+// ── fetchTicketKeywords ───────────────────────────────────────────────────────
+
+export async function fetchTicketKeywords(
+  user_id: number,
+  token: string
+): Promise<string[]> {
+  try {
+    const { data } = await axios.post(
+      "https://napi.authkey.io/api/v1/agent_ticket",
+      { user_id, method: "fetch_keywords", token, user_type: "admin" }
+    );
+    return (data.data ?? []).map((k: any) => k.keywords.keywords);
+  } catch {
+    return [];
+  }
+}
+
+// ── createTicketAPI ───────────────────────────────────────────────────────────
+
+export async function createTicketAPI(params: {
+  user_id: number;
+  token: string;
+  ticket_name: string;
+  ticket_description: string;
+  priority: "low" | "medium" | "high";
+  keywords: string;
+  remark: string;
+  customer_number: string;
+  customer_name?: string;
+  created_name?: string;
+}): Promise<{ success: boolean; message: string }> {
+  try {
+    const { data } = await axios.post(
+      "https://napi.authkey.io/api/v1/agent_ticket",
+      {
+        user_id: params.user_id,
+        user_type: "admin",
+        token: params.token,
+        ticket_name: params.ticket_name,
+        ticket_description: params.ticket_description,
+        remark: params.remark,
+        priority: params.priority,
+        method: "createTicket",
+        keywords: params.keywords,
+        customer_number: params.customer_number,
+        customer_name: params.customer_name || "Customer",
+        created_name: params.created_name || "AIBOT",
+        customer_email: ".",
+        currentDate: new Date().toISOString().split("T")[0],
+        assignee_name: "admin",
+        agent_id: params.user_id,
+        Assignee: { auto_assign: 1, assign_to: "" },
+        assigned_to_id: "",
+      }
+    );
+    return { success: true, message: data.message ?? "Ticket created successfully" };
+  } catch (err) {
+    const msg = axios.isAxiosError(err)
+      ? err.response?.data?.message ?? err.message
+      : err instanceof Error
+        ? err.message
+        : "Unknown error";
+    return { success: false, message: msg };
+  }
+}
+
+// ── addLabel ──────────────────────────────────────────────────────────────────
+
 export async function addLabel({
   user_id,
   token,

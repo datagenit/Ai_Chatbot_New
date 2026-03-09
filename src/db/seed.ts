@@ -18,6 +18,7 @@ async function seed() {
         get_current_datetime: true,
         search_knowledge_base: true,
         search_web: true,
+        create_ticket: true,
       },
       kb: {
         collectionName: "kb_6737",
@@ -33,6 +34,7 @@ async function seed() {
         get_current_datetime: false,
         search_knowledge_base: true,
         search_web: false,
+        create_ticket: false,
       },
       kb: {
         collectionName: "kb_admin2",

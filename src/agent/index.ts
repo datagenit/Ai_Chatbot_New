@@ -11,8 +11,10 @@ import { ToolNode } from "@langchain/langgraph/prebuilt";
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 import { retrieve } from "../ingestion/retriever.js";
-import { getCurrentDatetime, searchWeb } from "../tools/tools.js";
+import { getCurrentDatetime, searchWeb, createTicket } from "../tools/tools.js";
+import { fetchTicketKeywords } from "../services/cpaas.js";
 import AdminConfig from "../models/AdminConfig.js";
+import AdminCredentials from "../models/AdminCredentials.js";
 import Conversation from "../models/Conversation.js";
 import UsageLog from "../models/UsageLog.js";
 import { env } from "../config/env.js";
@@ -42,10 +44,12 @@ export async function runAgent(adminId: string, message: string, threadId: strin
       )
     : [];
 
-  // ── Fetch admin config ────────────────────────────────────────────────────
+  // ── Fetch admin config + credentials ─────────────────────────────────────
   const configDoc = await AdminConfig.findOne({ adminId });
   if (!configDoc) throw new Error(`Admin not found: ${adminId}`);
   const config = configDoc;
+
+  const creds = await AdminCredentials.findOne({ adminId });
 
   // ── Build tools array ─────────────────────────────────────────────────────
   const toolsArray: any[] = [];
@@ -58,12 +62,22 @@ export async function runAgent(adminId: string, message: string, threadId: strin
     toolsArray.push(searchWeb);
   }
 
+  if (config.tools.create_ticket === true) {
+    toolsArray.push(createTicket);
+  }
+
   console.log(`[DEBUG] Admin: ${adminId}, Tools loaded:`, toolsArray.map((t) => t.name));
 
   // ── RAG retrieval ONCE before graph (not inside graph loop) ──────────────
   const kbContext = config.tools.search_knowledge_base
     ? await retrieve(message, adminId, config.kb.collectionName, config.kb.maxResults)
     : "";
+
+  // ── Fetch ticket keywords if tool is enabled ──────────────────────────────
+  const ticketKeywords: string[] =
+    config.tools.create_ticket && creds
+      ? await fetchTicketKeywords(creds.user_id, creds.token)
+      : [];
 
   // ── LLM setup ────────────────────────────────────────────────────────────
   const llm = new ChatGroq({
@@ -115,9 +129,34 @@ export async function runAgent(adminId: string, message: string, threadId: strin
 
   const compiledGraph = graph.compile();
 
+  const keywordsLine = ticketKeywords.length > 0
+    ? `\n\nAvailable ticket keywords (use exactly one when creating a ticket): ${ticketKeywords.join(", ")}`
+    : "";
+
+  const confirmLine = config.confirmBeforeTicket
+    ? `\nBefore creating a ticket, ask: "Should I go ahead and raise a support ticket for this issue?" — only call create_ticket after user confirms. Never ask the user for priority, keywords, or any ticket fields — infer them from the conversation.`
+    : `\nWhen requested, create tickets immediately without asking for confirmation.`;
+
+
+  const escalationRule = config.tools.create_ticket
+    ? `\n\nEscalation policy: Always try to resolve the user's issue using the knowledge base and available tools first. Only create a support ticket if: (1) the user explicitly requests a ticket, OR (2) you have searched the knowledge base and cannot find a resolution. Never create a ticket for questions you can answer directly.`
+    : "";
+
+
+  const basePrompt = config.customSystemPrompt?.trim()
+    ? config.customSystemPrompt.trim()
+    : "You are a helpful assistant.";
+
+  const kbRestrictionLine = config.kbOnlyMode
+    ? `\n\nIMPORTANT: You MUST only answer questions using the knowledge base context provided above. If the answer is not found in the knowledge base context, respond with: "I'm sorry, I don't have information about that in my knowledge base. Would you like me to raise a support ticket?" Do NOT use your general knowledge to answer any question. Do NOT make up answers.`
+    : "";
+
+  const threadLine = `\nThe current conversation threadId (customer phone number) is: ${threadId}`;
+
   const systemPrompt = kbContext
-    ? `You are a helpful assistant.\nUse the following knowledge base context to answer the user's question.\nIf the context does not contain enough information, say so clearly.\n\n--- KNOWLEDGE BASE CONTEXT ---\n${kbContext}\n--- END CONTEXT ---\n\nAnswer directly and concisely. Do NOT call any search tools if the context above is sufficient.`
-    : `You are a helpful assistant.`;
+    ? `${basePrompt}${threadLine}\n\nUse the following knowledge base context to answer the user's question.\nIf the context does not contain enough information, say so clearly.\n\n--- KNOWLEDGE BASE CONTEXT ---\n${kbContext}\n--- END CONTEXT ---\n\nAnswer directly and concisely. Do NOT call search tools if the context above is sufficient.${kbRestrictionLine}${keywordsLine}${confirmLine}${escalationRule}`
+    : `${basePrompt}${threadLine}${kbRestrictionLine}${keywordsLine}${confirmLine}${escalationRule}`;
+
 
   // ── Invoke graph ──────────────────────────────────────────────────────────
   const agentStart = Date.now();
@@ -127,7 +166,7 @@ export async function runAgent(adminId: string, message: string, threadId: strin
       adminId,
       systemPrompt,
     },
-    { recursionLimit: 25 }
+    { recursionLimit: 25, configurable: { adminId } }
   );
   const latencyMs = Date.now() - agentStart;
 
