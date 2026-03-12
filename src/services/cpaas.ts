@@ -140,7 +140,7 @@ export async function fetchTicketKeywords(
 ): Promise<string[]> {
   try {
     const { data } = await axios.post(
-      "https://napi.authkey.io/api/v1/agent_ticket",
+      `${env.TOOL_URL1}/v1/agent_ticket`,
       { user_id, method: "fetch_keywords", token, user_type: "admin" }
     );
     return (data.data ?? []).map((k: any) => k.keywords.keywords);
@@ -165,7 +165,7 @@ export async function createTicketAPI(params: {
 }): Promise<{ success: boolean; message: string }> {
   try {
     const { data } = await axios.post(
-      "https://napi.authkey.io/api/v1/agent_ticket",
+      `${env.TOOL_URL1}/v1/agent_ticket`,
       {
         user_id: params.user_id,
         user_type: "admin",
@@ -197,6 +197,64 @@ export async function createTicketAPI(params: {
     return { success: false, message: msg };
   }
 }
+
+// ── sendTemplate ─────────────────────────────────────────────────────────────
+
+export async function sendTemplate(params: {
+  user_id: number;
+  token: string;
+  mobile: string;
+  wid: number;
+  templateName: string;
+  bodyParams: Record<string, string>;
+  headerParams: Record<string, string>;
+  mediaUrl: string;
+  brandNumber?: string;
+  createdByName?: string;
+  createdById?: number;
+}): Promise<void> {
+  const { data } = await axios.post(`${env.TOOL_URL3}/bulk_campaign_whatsapp.php`, {
+    method: "agent_broadcast_single",
+    user_id: params.user_id,
+    token: params.token,
+    channel: "whatsapp",
+    created_by: "AGENT",
+    created_by_name: params.createdByName ?? "AI Agent",
+    created_by_id: params.createdById ?? params.user_id,
+    camp_name: "promotion",
+    template_id: params.wid,
+    media_url: params.mediaUrl,
+    brand_number: params.brandNumber ?? "",
+    total_count: 1,
+    parameter: {
+      body: { ...params.bodyParams },
+      header: { ...params.headerParams },
+    },
+    data: [{ mobile: params.mobile }],
+  });
+  console.log({
+    
+      method: "agent_broadcast_single",
+      user_id: params.user_id,
+      token: params.token,
+      channel: "whatsapp",
+      created_by: "AGENT",
+      created_by_name: params.createdByName ?? "AI Agent",
+      created_by_id: params.createdById ?? params.user_id,
+      camp_name: "promotion",
+      template_id: params.wid,
+      media_url: params.mediaUrl,
+      brand_number: params.brandNumber ?? "",
+      total_count: 1,
+      parameter: {
+        body: { ...params.bodyParams },
+        header: { ...params.headerParams },
+      },
+      data: [{ mobile: params.mobile }],
+  });
+  if (!data.success) throw new Error(data.message ?? "sendTemplate failed");
+}
+
 
 // ── addLabel ──────────────────────────────────────────────────────────────────
 

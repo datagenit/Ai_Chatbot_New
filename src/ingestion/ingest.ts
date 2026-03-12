@@ -33,7 +33,7 @@ export async function ingest(
   const loader = new PDFLoader(filePath);
   const documents = await loader.load();
 
-  // ── OCR enrichment — append image-extracted text to each page doc ─────────
+  // ── OCR enrichment — only for pages with little/no extracted text ─────────
   try {
     const pageCount = Math.min(documents.length, 20);
     const pageNumbers = Array.from({ length: pageCount }, (_, i) => i + 1);
@@ -49,17 +49,29 @@ export async function ingest(
 
     for (let i = 0; i < bufferResponses.length; i++) {
       const buf = bufferResponses[i]?.buffer;
-      if (!buf) continue;
 
-      const { data } = await Tesseract.recognize(buf, "eng");
-      const ocrText = data.text?.trim();
-      if (ocrText) {
-        documents[i].pageContent += `\n${ocrText}`;
+      // skip if buffer is missing or empty
+      if (!buf || !Buffer.isBuffer(buf) || buf.length === 0) continue;
+
+      // skip OCR if page already has substantial text
+      if (documents[i]?.pageContent?.trim().length > 100) continue;
+
+      try {
+        const { data } = await Tesseract.recognize(buf, "eng");
+        const ocrText = data.text?.trim();
+        if (ocrText) {
+          documents[i].pageContent += `\n${ocrText}`;
+        }
+      } catch (pageErr) {
+        console.warn(
+          `[ingest] OCR failed for page ${i + 1}, skipping:`,
+          pageErr instanceof Error ? pageErr.message : pageErr
+        );
       }
     }
   } catch (err) {
     console.warn(
-      "[ingest] OCR failed, continuing text-only:",
+      "[ingest] OCR setup failed, continuing text-only:",
       err instanceof Error ? err.message : err
     );
   }
@@ -88,7 +100,7 @@ export async function ingest(
     chunks = chunks.slice(0, 50);
   }
 
-  // Tag metadata (mirrors your original structure)
+  // Tag metadata
   const taggedChunks = chunks.map((chunk) => ({
     ...chunk,
     metadata: {
@@ -103,7 +115,7 @@ export async function ingest(
   const pineconeIndex = pinecone.Index(env.PINECONE_INDEX_NAME);
   const vectorIds = chunks.map(() => uuidv4());
 
-  // Upsert into admin's namespace with deterministic IDs for later deletion
+  // Upsert into admin's namespace
   await PineconeStore.fromDocuments(taggedChunks, embeddings, {
     pineconeIndex: pineconeIndex as any,
     namespace,

@@ -6,10 +6,17 @@ import automationsRouter from "./automations.js";
 import { authMiddleware, AuthRequest } from "../middleware/auth.js";
 import { runAutomations } from "../automations/engine.js";
 import UsageLog from "../models/UsageLog.js";
+import { apiLimiter, chatLimiter, credentialsLimiter } from "../middleware/rateLimiter.js";
+import { sanitizeInput } from "../middleware/sanitize.js";
 
 const router = Router();
 
-router.post("/chat", authMiddleware, async (req: AuthRequest, res) => {
+router.use(sanitizeInput);
+router.use(apiLimiter);
+
+router.use("/automations/credentials", credentialsLimiter);
+
+router.post("/chat", chatLimiter, authMiddleware, async (req: AuthRequest, res) => {
   const requestStart = Date.now();
   try {
     const { message, threadId } = req.body as {
@@ -94,6 +101,12 @@ router.get("/health", (_req, res) => {
 
 // Admin management routes
 router.use("/admin", authMiddleware, adminRoutes);
+
+// Public — internal pipeline use only, no auth
+router.get("/automations/trigger-templates/active/:adminId", (req, res, next) => {
+  req.url = req.url.replace(/^\/automations/, "") || "/";
+  automationsRouter(req, res, next);
+});
 
 // Automations routes (auth applied at mount level)
 router.use("/automations", authMiddleware, automationsRouter);

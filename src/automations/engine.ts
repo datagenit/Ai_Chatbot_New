@@ -1,6 +1,6 @@
 import AutomationRule from "../models/AutomationRule.js";
 import AdminCredentials from "../models/AdminCredentials.js";
-import { assignAgent, addLabel } from "../services/cpaas.js";
+import { assignAgent, addLabel, sendTemplate } from "../services/cpaas.js";
 
 // ── Simple local sentiment classifier ─────────────────────────────────────────
 
@@ -30,6 +30,23 @@ export interface AutomationResult {
   rule: string | null;
 }
 
+// ── Template variable resolver ────────────────────────────────────────────────
+
+function resolveTemplateVars(
+  params: Record<string, string>,
+  vars: { mobile: string; message: string; brandNumber: string }
+): Record<string, string> {
+  const resolved: Record<string, string> = {};
+  for (const [key, value] of Object.entries(params)) {
+    resolved[key] = value
+      .replace(/\{\{user_name\}\}/g, vars.mobile)
+      .replace(/\{\{user_input\}\}/g, vars.message)
+      .replace(/\{\{agent_name\}\}/g, "AI Agent")
+      .replace(/\{\{brand_number\}\}/g, vars.brandNumber);
+  }
+  return resolved;
+}
+
 // ── Main runner ────────────────────────────────────────────────────────────────
 
 export async function runAutomations(
@@ -49,12 +66,6 @@ export async function runAutomations(
 
     // Load CPaaS credentials
     const credentials = await AdminCredentials.findOne({ adminId });
-    if (!credentials) {
-      console.warn(
-        `[Automations] No CPaaS credentials found for adminId: ${adminId} — skipping`
-      );
-      return { matched: false, rule: null };
-    }
 
     const lower = message.toLowerCase();
     const detectedSentiment = detectSentiment(message);
@@ -63,6 +74,12 @@ export async function runAutomations(
     );
 
     for (const rule of rules) {
+      // trigger_template docs have no trigger/action — skip them
+      if (!rule.trigger || !rule.action) continue;
+
+      // skip action execution if no credentials
+      if (!credentials) continue;
+
       let triggered = false;
 
       // ── Evaluate trigger ─────────────────────────────────────────────────
@@ -108,6 +125,94 @@ export async function runAutomations(
 
       // Only first matching rule fires
       return { matched: true, rule: rule.name };
+    }
+
+    // ── Trigger Templates — intent matching ──────────────────────────────
+    if (!credentials) {
+      console.warn(`[TriggerTemplates] No CPaaS credentials for adminId: ${adminId} — skipping templates`);
+      return { matched: false, rule: null };
+    }
+
+    const triggerTemplates = await AutomationRule.find({
+      adminId,
+      ruleType: "trigger_template",
+      enabled: true,
+    });
+
+    for (const tmpl of triggerTemplates) {
+      const tc = tmpl.triggerConfig;
+      if (!tc) continue;
+
+      // only intent type handled inline — no_reply/stage need scheduler
+      if (tc.triggerType !== "intent") continue;
+
+      const keywords = tc.keywords ?? [];
+      const matched = keywords.some((kw) => lower.includes(kw.toLowerCase()));
+      if (!matched) continue;
+
+      // cooldown check
+      const lastFiredMap = tc.lastFired as Map<string, Date>;
+      const lastFiredAt = lastFiredMap?.get(mobile);
+      if (lastFiredAt) {
+        const cooldownMs = (tc.cooldownHours ?? 24) * 60 * 60 * 1000;
+        if (Date.now() - lastFiredAt.getTime() < cooldownMs) {
+          console.log(`[TriggerTemplates] Cooldown active for "${tmpl.name}" → ${mobile}`);
+          continue;
+        }
+      }
+
+      console.log(`[TriggerTemplates] Firing "${tmpl.name}" → ${mobile}`);
+
+      try {
+        if (!tc.template) {
+          console.warn(`[TriggerTemplates] No template config for "${tmpl.name}" — skipping`);
+          continue;
+        }
+
+        const vars = {
+          mobile,
+          message,
+          brandNumber: credentials.brandNumber ?? "",
+        };
+
+        const resolvedBodyParams = resolveTemplateVars(
+          Object.fromEntries(tc.template.bodyParams ?? new Map()),
+          vars
+        );
+        const resolvedHeaderParams = resolveTemplateVars(
+          Object.fromEntries(tc.template.headerParams ?? new Map()),
+          vars
+        );
+
+        await sendTemplate({
+          user_id: credentials.user_id,
+          token: credentials.token,
+          mobile,
+          wid: tc.template.wid,
+          templateName: tc.template.templateName ?? "",
+          bodyParams: resolvedBodyParams,
+          headerParams: resolvedHeaderParams,
+          mediaUrl: tc.template.mediaUrl ?? "",
+          brandNumber: credentials.brandNumber ?? "",
+          createdByName: "AI Agent",
+          createdById: credentials.user_id,
+        });
+
+        // update lastFired for cooldown tracking
+        await AutomationRule.updateOne(
+          { _id: tmpl._id },
+          { $set: { [`triggerConfig.lastFired.${mobile}`]: new Date() } }
+        );
+
+        console.log(`[TriggerTemplates] Sent and lastFired updated for "${tmpl.name}"`);
+      } catch (tmplErr) {
+        console.error(
+          `[TriggerTemplates] Failed to send template "${tmpl.name}":`,
+          tmplErr instanceof Error ? tmplErr.message : tmplErr
+        );
+      }
+
+      // do NOT break — fire ALL matching templates
     }
 
     return { matched: false, rule: null };

@@ -5,6 +5,7 @@ export interface IAdminCredentials extends Document {
   user_id: number;
   token: string;
   email: string;
+  brandNumber?: string;
   createdAt: Date;
 }
 
@@ -26,6 +27,10 @@ const AdminCredentialsSchema = new Schema<IAdminCredentials>({
   email: {
     type: String,
     required: true,
+  },
+  brandNumber: {
+    type: String,
+    default: "",
   },
   createdAt: {
     type: Date,

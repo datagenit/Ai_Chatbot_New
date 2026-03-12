@@ -16,10 +16,12 @@ export const env = {
   NODE_ENV: getEnvOptional("NODE_ENV", "development"),
   PORT: parseInt(getEnvOptional("PORT", "3000"), 10),
   GROQ_API_KEY: getEnv("GROQ_API_KEY"),
+  GEMINI_API_KEY: getEnv("GEMINI_API_KEY"),
   MONGODB_URI: getEnv("MONGODB_URI"),
   JWT_SECRET: getEnv("JWT_SECRET"),
   TOOL_URL1: getEnv("TOOL_URL1"),
   TOOL_URL2: getEnv("TOOL_URL2"),
+  TOOL_URL3: getEnv("TOOL_URL3"),
   AUTH_SERVER_URL: getEnv("AUTH_SERVER_URL"),
   PINECONE_API_KEY: getEnv("PINECONE_API_KEY"),       // ← added
   PINECONE_INDEX_NAME: getEnv("PINECONE_INDEX_NAME")

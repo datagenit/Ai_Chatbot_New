@@ -153,9 +153,11 @@ export async function runAgent(adminId: string, message: string, threadId: strin
 
   const threadLine = `\nThe current conversation threadId (customer phone number) is: ${threadId}`;
 
+  const languageLine = `\n\nIMPORTANT: Always detect the language of the user's message and respond in the SAME language. If the user writes in Hindi, respond in Hindi. If in Arabic, respond in Arabic. If in Spanish, respond in Spanish. Match the user's language exactly in every response.`;
+
   const systemPrompt = kbContext
-    ? `${basePrompt}${threadLine}\n\nUse the following knowledge base context to answer the user's question.\nIf the context does not contain enough information, say so clearly.\n\n--- KNOWLEDGE BASE CONTEXT ---\n${kbContext}\n--- END CONTEXT ---\n\nAnswer directly and concisely. Do NOT call search tools if the context above is sufficient.${kbRestrictionLine}${keywordsLine}${confirmLine}${escalationRule}`
-    : `${basePrompt}${threadLine}${kbRestrictionLine}${keywordsLine}${confirmLine}${escalationRule}`;
+    ? `${basePrompt}${threadLine}${languageLine}\n\nUse the following knowledge base context to answer the user's question.\nIf the context does not contain enough information, say so clearly.\n\n--- KNOWLEDGE BASE CONTEXT ---\n${kbContext}\n--- END CONTEXT ---\n\nAnswer directly and concisely. Do NOT call search tools if the context above is sufficient.${kbRestrictionLine}${keywordsLine}${confirmLine}${escalationRule}`
+    : `${basePrompt}${threadLine}${languageLine}${kbRestrictionLine}${keywordsLine}${confirmLine}${escalationRule}`;
 
 
   // ── Invoke graph ──────────────────────────────────────────────────────────
