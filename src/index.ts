@@ -4,11 +4,12 @@ import { env } from "./config/env.js";
 import routes from "./routes/index.js";
 import connectDB from "./db/mongodb.js";
 import { ensureIndex } from "./ingestion/retriever.js";
+import { resumeDelayedWorkflows } from "./workflows/delayScheduler.js";
 
 const app = express();
 
 app.use(cors({
-  origin: "http://localhost:3001", // Vite dev server default port
+  origin: "http://localhost:3000", // Vite dev server default port
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
   allowedHeaders: ["Content-Type", "Authorization"],
 }));
@@ -26,6 +27,8 @@ connectDB()
     app.listen(env.PORT, () => {
       console.log(`Server listening on http://localhost:${env.PORT}`);
     });
+    resumeDelayedWorkflows();
+    setInterval(resumeDelayedWorkflows, 60 * 1000);
   })
   .catch((err) => {
     console.error("[Startup Error]", err);

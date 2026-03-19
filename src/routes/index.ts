@@ -3,9 +3,15 @@ import { runAgent } from "../agent/index.js";
 import { AIMessage } from "@langchain/core/messages";
 import adminRoutes from "./admin.js";
 import automationsRouter from "./automations.js";
+import workflowRoutes from "./workflows.js";
 import { authMiddleware, AuthRequest } from "../middleware/auth.js";
 import { runAutomations } from "../automations/engine.js";
 import UsageLog from "../models/UsageLog.js";
+import WorkflowSession from "../models/WorkflowSession.js";
+import Workflow from "../models/Workflow.js";
+import { runWorkflow } from "../workflows/engine.js";
+import { matchWorkflowTrigger } from "../workflows/triggerMatcher.js";
+import { isThreadDelayed } from "../workflows/delayScheduler.js";
 import { apiLimiter, chatLimiter, credentialsLimiter } from "../middleware/rateLimiter.js";
 import { sanitizeInput } from "../middleware/sanitize.js";
 
@@ -32,9 +38,67 @@ router.post("/chat", chatLimiter, authMiddleware, async (req: AuthRequest, res) 
     const adminId = req.adminId!;
     const input = message ?? "Hello";
 
-    // Run automations before the agent (threadId == mobile number)
-    await runAutomations(adminId, input, threadId);
+    // ── 1. Delay check — if thread is in a workflow delay, do nothing ─────────
+    const delayed = await isThreadDelayed(threadId);
+    if (delayed) {
+      res.status(200).json({ success: true, response: "", threadId });
+      return;
+    }
 
+    // ── 2. Active workflow session ─────────────────────────────────────────────
+    const activeSession = await WorkflowSession.findOne({ threadId, done: false });
+    if (activeSession) {
+      try {
+        const wfResponse = await runWorkflow(threadId, adminId, input);
+        res.json({ success: true, response: wfResponse ?? "", threadId });
+        return;
+      } catch (wfErr) {
+        console.error("[Workflow] engine error, falling through to agent:", wfErr);
+        await WorkflowSession.findOneAndUpdate({ threadId }, { $set: { done: true } });
+        // do NOT return — fall through to step 5
+      }
+    }
+
+    // ── 3. Workflow trigger matching ───────────────────────────────────────────
+    const triggerMatch = await matchWorkflowTrigger(adminId, input);
+    if (triggerMatch) {
+      const workflow = await Workflow.findById(triggerMatch.workflowId);
+      if (workflow) {
+        try {
+          await WorkflowSession.findOneAndUpdate(
+            { threadId, done: false },
+            {
+              $setOnInsert: {
+                adminId,
+                threadId,
+                workflowId: triggerMatch.workflowId,
+                currentStepId: workflow.entryStepId,
+                collectedData: new Map(),
+                waitingForInput: false,
+                done: false,
+              },
+            },
+            { upsert: true, new: true }
+          );
+          const wfResponse = await runWorkflow(threadId, adminId, input);
+          res.json({ success: true, response: wfResponse ?? "", threadId });
+          return;
+        } catch (wfErr) {
+          console.error("[Workflow] engine error, falling through to agent:", wfErr);
+          // do NOT return — fall through to step 5
+        }
+      }
+    }
+
+    // ── 4. Automation rules ────────────────────────────────────────────────────
+    // Run automations before the agent (threadId == mobile number)
+    const automationResult = await runAutomations(adminId, input, threadId);
+    if (automationResult.matched) {
+      res.json({ success: true, response: "", threadId });
+      return;
+    }
+
+    // ── 5. AI agent (fallthrough) ──────────────────────────────────────────────
     const result = await runAgent(adminId, input, threadId);
 
     // Extract the final AI response text from the result messages
@@ -110,5 +174,8 @@ router.get("/automations/trigger-templates/active/:adminId", (req, res, next) =>
 
 // Automations routes (auth applied at mount level)
 router.use("/automations", authMiddleware, automationsRouter);
+
+// Workflow routes
+router.use("/workflows", authMiddleware, workflowRoutes);
 
 export default router;
