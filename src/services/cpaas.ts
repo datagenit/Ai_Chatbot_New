@@ -1,5 +1,147 @@
 import axios from "axios";
 import { env } from "../config/env.js";
+import AdminCredentials from "../models/AdminCredentials.js";
+
+// ── CPaaS fetch wrapper ───────────────────────────────────────────────────────
+
+const CPAAS_URL = "https://db2.authkey.io/api/netcore_conversation.php";
+
+async function postToCPaaS(payload: Record<string, unknown>): Promise<void> {
+  console.log("[CPaaS] sending to:", CPAAS_URL);
+  console.log("[CPaaS] payload:", JSON.stringify(payload, null, 2));
+  try {
+    const res = await fetch(CPAAS_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const responseText = await res.text();
+    console.log("[CPaaS] ← STATUS:", res.status);        // ← ADD
+    console.log("[CPaaS] ← RESPONSE:", responseText);
+    if (!res.ok) {
+      const err = await res.text();
+      console.error("[CPaaS] request failed:", err);
+    }
+  } catch (err) {
+    console.error("[CPaaS] postToCPaaS error:", err instanceof Error ? err.message : err);
+  }
+}
+
+// ── CPaaS credential types ────────────────────────────────────────────────────
+
+interface CPaaSCredentials {
+  token: string;
+  userId: number;
+  brandNumber: string;
+}
+
+export interface SendTextParams {
+  credentials: CPaaSCredentials;
+  mobile: string;
+  message: string;
+}
+
+export interface SendTextWithButtonsParams {
+  credentials: CPaaSCredentials;
+  mobile: string;
+  message: string;
+  buttons: { id: string; title: string }[];
+  headerImage?: { type: string; image: string };
+  footerText?: string;
+}
+
+export interface SendMediaParams {
+  credentials: CPaaSCredentials;
+  mobile: string;
+  mediaUrl: string;
+  messageType: "IMAGE" | "VIDEO" | "AUDIO" | "file";
+  caption?: string;
+}
+
+// ── getCredentials ────────────────────────────────────────────────────────────
+
+export async function getCredentials(adminId: string): Promise<CPaaSCredentials | null> {
+  try {
+    const creds = await AdminCredentials.findOne({ adminId });
+    if (!creds) {
+      console.error("[CPaaS] No credentials found for adminId:", adminId);
+      return null;
+    }
+    return {
+      token: creds.token,
+      userId: creds.user_id,
+      brandNumber: creds.brandNumber ?? "",
+    };
+  } catch (err) {
+    console.error("[CPaaS] getCredentials error:", err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+// ── sendTextMessage ───────────────────────────────────────────────────────────
+
+export async function sendTextMessage({ credentials, mobile, message }: SendTextParams): Promise<void> {
+  await postToCPaaS({
+    token: credentials.token,
+    user_id: credentials.userId,
+    method: "reply",
+    mobile,
+    message_type: "TEXT",
+    req_from: "BOT_REPLY",
+    brand_number: credentials.brandNumber,
+    content: message,
+  });
+}
+
+// ── sendTextWithButtons ───────────────────────────────────────────────────────
+
+export async function sendTextWithButtons({
+  credentials, mobile, message, buttons, headerImage, footerText = "",
+}: SendTextWithButtonsParams): Promise<void> {
+  console.log("[CPaaS] sendTextWithButtons called | mobile:", mobile);
+
+  // Authkey expects numeric id, flat format — no interactive wrapper
+  const formattedButtons = buttons.map((btn, index) => ({
+    id: index + 1,        // ← numeric starting from 1
+    title: btn.title,     // ← plain title string
+    type: "reply",
+  }));
+
+  await postToCPaaS({
+    token: credentials.token,
+    user_id: credentials.userId,
+    method: "send_text_withbutton",
+    req_from: "BOT_REPLY",
+    request_type: "",
+    brand_number: credentials.brandNumber,
+    mobile,
+    content: message,
+    header_text: headerImage ?? {},
+    footer_text: footerText,
+    buttons: formattedButtons,  // ← flat numeric format, no interactive wrapper
+  });
+}
+
+
+
+// ── sendMediaMessage ──────────────────────────────────────────────────────────
+
+export async function sendMediaMessage({
+  credentials, mobile, mediaUrl, messageType, caption = "",
+}: SendMediaParams): Promise<void> {
+  await postToCPaaS({
+    token: credentials.token,
+    user_id: credentials.userId,
+    method: "media_reply",
+    req_from: "BOT_REPLY",
+    mobile,
+    message_type: messageType,
+    brand_number: credentials.brandNumber,
+    attachment_url: mediaUrl,
+    media_url: mediaUrl,
+    caption,
+  });
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -233,24 +375,24 @@ export async function sendTemplate(params: {
     data: [{ mobile: params.mobile }],
   });
   console.log({
-    
-      method: "agent_broadcast_single",
-      user_id: params.user_id,
-      token: params.token,
-      channel: "whatsapp",
-      created_by: "AGENT",
-      created_by_name: params.createdByName ?? "AI Agent",
-      created_by_id: params.createdById ?? params.user_id,
-      camp_name: "promotion",
-      template_id: params.wid,
-      media_url: params.mediaUrl,
-      brand_number: params.brandNumber ?? "",
-      total_count: 1,
-      parameter: {
-        body: { ...params.bodyParams },
-        header: { ...params.headerParams },
-      },
-      data: [{ mobile: params.mobile }],
+
+    method: "agent_broadcast_single",
+    user_id: params.user_id,
+    token: params.token,
+    channel: "whatsapp",
+    created_by: "AGENT",
+    created_by_name: params.createdByName ?? "AI Agent",
+    created_by_id: params.createdById ?? params.user_id,
+    camp_name: "promotion",
+    template_id: params.wid,
+    media_url: params.mediaUrl,
+    brand_number: params.brandNumber ?? "",
+    total_count: 1,
+    parameter: {
+      body: { ...params.bodyParams },
+      header: { ...params.headerParams },
+    },
+    data: [{ mobile: params.mobile }],
   });
   if (!data.success) throw new Error(data.message ?? "sendTemplate failed");
 }

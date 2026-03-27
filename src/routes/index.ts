@@ -37,7 +37,7 @@ router.post("/chat", chatLimiter, authMiddleware, async (req: AuthRequest, res) 
 
     const adminId = req.adminId!;
     const input = message ?? "Hello";
-
+    console.log('[Chat] input:', input, '| threadId:', threadId);
     // ── 1. Delay check — if thread is in a workflow delay, do nothing ─────────
     const delayed = await isThreadDelayed(threadId);
     if (delayed) {
@@ -47,9 +47,11 @@ router.post("/chat", chatLimiter, authMiddleware, async (req: AuthRequest, res) 
 
     // ── 2. Active workflow session ─────────────────────────────────────────────
     const activeSession = await WorkflowSession.findOne({ threadId, done: false });
+    console.log('[Chat] activeSession:', !!activeSession, activeSession ? `stepId: ${activeSession.currentStepId} | waiting: ${activeSession.waitingForInput}` : '');
     if (activeSession) {
       try {
         const wfResponse = await runWorkflow(threadId, adminId, input);
+        console.log('[Chat] wfResponse:', wfResponse);
         res.json({ success: true, response: wfResponse ?? "", threadId });
         return;
       } catch (wfErr) {
@@ -61,25 +63,27 @@ router.post("/chat", chatLimiter, authMiddleware, async (req: AuthRequest, res) 
 
     // ── 3. Workflow trigger matching ───────────────────────────────────────────
     const triggerMatch = await matchWorkflowTrigger(adminId, input);
+    console.log('[Chat] triggerMatch:', !!triggerMatch);
     if (triggerMatch) {
       const workflow = await Workflow.findById(triggerMatch.workflowId);
       if (workflow) {
         try {
+          // Close any stuck active session for this thread
           await WorkflowSession.findOneAndUpdate(
             { threadId, done: false },
-            {
-              $setOnInsert: {
-                adminId,
-                threadId,
-                workflowId: triggerMatch.workflowId,
-                currentStepId: workflow.entryStepId,
-                collectedData: new Map(),
-                waitingForInput: false,
-                done: false,
-              },
-            },
-            { upsert: true, new: true }
+            { $set: { done: true } }
           );
+
+          // Always create a fresh session for the new trigger
+          await WorkflowSession.create({
+            adminId,
+            threadId,
+            workflowId: triggerMatch.workflowId,
+            currentStepId: workflow.entryStepId,
+            collectedData: new Map(),
+            waitingForInput: false,
+            done: false,
+          });
           const wfResponse = await runWorkflow(threadId, adminId, input);
           res.json({ success: true, response: wfResponse ?? "", threadId });
           return;
@@ -150,7 +154,7 @@ router.post("/chat", chatLimiter, authMiddleware, async (req: AuthRequest, res) 
         source: _tid.startsWith("admin-test") ? "test" : "whatsapp",
         latencyMs: Date.now() - requestStart,
         status: "error",
-      }).catch(() => {});
+      }).catch(() => { });
     }
     res.status(500).json({
       success: false,

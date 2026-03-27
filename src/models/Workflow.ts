@@ -7,7 +7,7 @@ const StepSchema = new Schema(
     id: { type: String, required: true },
     type: {
       type: String,
-      enum: ["message", "collect_input", "api_call", "send_template", "delay", "condition"],
+      enum: ["message", "collect_input", "api_call", "send_template", "delay", "condition", "send_interactive"],
       required: true,
     },
     nextStep: { type: String },
@@ -57,6 +57,18 @@ const StepSchema = new Schema(
       onTrue: { type: String },
       onFalse: { type: String },
     },
+    // type: "send_interactive"
+    interactiveConfig: {
+      message: { type: String },
+      buttons: [
+        {
+          id: { type: String },
+          title: { type: String },
+        },
+      ],
+      nextStep: { type: String },
+    },
+
   },
   { _id: false }
 );
@@ -65,7 +77,7 @@ const StepSchema = new Schema(
 
 export interface IWorkflowStep {
   id: string;
-  type: "message" | "collect_input" | "api_call" | "send_template" | "delay" | "condition";
+  type: "message" | "collect_input" | "api_call" | "send_template" | "delay" | "condition" | "send_interactive";
   nextStep?: string;
   message?: string;
   inputKey?: string;
@@ -92,6 +104,12 @@ export interface IWorkflowStep {
     onTrue?: string;
     onFalse?: string;
   };
+  interactiveConfig?: {
+    message: string;
+    buttons: { id: string; title: string }[];
+    nextStep: string;
+  };
+
 }
 
 export interface IWorkflow extends Document {

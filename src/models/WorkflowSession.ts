@@ -1,3 +1,5 @@
+// MANUAL STEP REQUIRED: run this once in MongoDB Compass to drop the old bad index:
+// db.workflowsessions.dropIndex("threadId_1")
 import mongoose, { Schema, Document } from "mongoose";
 
 // ── Interface ─────────────────────────────────────────────────────────────────
@@ -19,7 +21,7 @@ export interface IWorkflowSession extends Document {
 
 const WorkflowSessionSchema = new Schema<IWorkflowSession>({
   adminId: { type: String, required: true, index: true },
-  threadId: { type: String, required: true, unique: true, index: true },
+  threadId: { type: String, required: true, index: true },
   workflowId: { type: String, required: true },
   currentStepId: { type: String, required: true },
   collectedData: { type: Map, of: String, default: {} },
@@ -29,6 +31,15 @@ const WorkflowSessionSchema = new Schema<IWorkflowSession>({
   startedAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now },
 });
+
+// TTL — auto-delete completed sessions after 30 days
+WorkflowSessionSchema.index(
+  { updatedAt: 1 },
+  {
+    expireAfterSeconds: 30 * 24 * 60 * 60,
+    partialFilterExpression: { done: true },
+  }
+);
 
 const WorkflowSession = mongoose.model<IWorkflowSession>(
   "WorkflowSession",

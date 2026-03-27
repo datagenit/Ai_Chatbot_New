@@ -38,6 +38,25 @@ VALID STEP TYPES AND REQUIRED FIELDS:
 message:
   { id, type: "message", message: "string (use {{variable}} for collected data)", nextStep }
 
+send_interactive:
+  {
+    id,
+    type: "send_interactive",
+    nextStep,
+    interactiveConfig: {
+      message: "string — the message text to show above buttons",
+      buttons: [
+        { id: "btn_1", title: "Button label (max 20 chars)" },
+        { id: "btn_2", title: "Button label (max 20 chars)" }
+      ],
+      nextStep: "same value as parent nextStep"
+    }
+  }
+  Note: buttons array must have 1–3 items. Button id must be unique snake_case.
+  The user's button click reply is received as the button id value.
+  Use send_interactive when the user needs to pick from a fixed set of options.
+  After send_interactive, use collect_input with inputKey to store the button choice.
+
 collect_input:
   { id, type: "collect_input", inputKey: "snake_case_name", inputPrompt: "question to ask user", validation: "text"|"phone"|"date"|"email", nextStep }
 
@@ -53,6 +72,7 @@ delay:
 condition:
   { id, type: "condition", condition: { variable: "{{variable}}", operator: "equals"|"contains"|"exists", value: "string", onTrue: "step_id or END", onFalse: "step_id or END" } }
   Note: condition steps do NOT have nextStep — routing is via onTrue/onFalse only
+  send_interactive steps have nextStep on the parent step AND inside interactiveConfig — both must be the same value
 
 TRIGGER:
   trigger: { type: "keyword", keywords: ["extracted", "from", "description"] }

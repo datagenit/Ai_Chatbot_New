@@ -2,7 +2,7 @@ import axios from "axios";
 import Workflow from "../models/Workflow.js";
 import WorkflowSession from "../models/WorkflowSession.js";
 import AdminCredentials from "../models/AdminCredentials.js";
-import { sendTemplate } from "../services/cpaas.js";
+import { sendTemplate, getCredentials, sendTextMessage, sendTextWithButtons } from "../services/cpaas.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -33,6 +33,12 @@ export async function runWorkflow(
     const session = await WorkflowSession.findOne({ threadId, done: false });
     if (!session) return null;
 
+    if (session.currentStepId === "END") {
+      session.done = true;
+      await session.save();
+      return null;
+    }
+
     const workflow = await Workflow.findById(session.workflowId);
     if (!workflow) {
       session.done = true;
@@ -44,6 +50,8 @@ export async function runWorkflow(
     let continueLoop = true;
 
     while (continueLoop) {
+      console.log('[Engine] step:', session.currentStepId, '| waitingForInput:', 
+        session.waitingForInput, '| lastMessage:', lastMessage);
       if (session.currentStepId === "END") {
         session.done = true;
         break;
@@ -55,15 +63,54 @@ export async function runWorkflow(
         break;
       }
 
-      const data = Object.fromEntries(session.collectedData ?? new Map());
+      const data: Record<string, string> = {
+        ...Object.fromEntries(session.collectedData ?? new Map()),
+        last_message: lastMessage,
+      };
 
       switch (step.type) {
         // ── message ─────────────────────────────────────────────────────────
         case "message": {
-          outboundMsg = interpolate(step.message ?? "", data);
+          const messageText = interpolate(step.message ?? "", data);
+          outboundMsg = messageText;
+
+          if (/^\d{10,15}$/.test(threadId)) {
+            const creds = await getCredentials(adminId);
+            if (creds) {
+              await sendTextMessage({
+                credentials: creds,
+                mobile: session.threadId,
+                message: messageText,
+              });
+            }
+          }
+
           session.currentStepId = step.nextStep ?? "END";
-          continueLoop = false; // pause to deliver message
-          console.log('[Engine] outboundMsg:', outboundMsg);
+          continueLoop = false;
+          break;
+        }
+
+        // ── send_interactive ──────────────────────────────────────────────────
+        case "send_interactive": {
+          const ic = (step as any).interactiveConfig;
+          const messageText = ic?.message ?? "";
+          outboundMsg = messageText;
+
+          if (/^\d{10,15}$/.test(threadId)) {
+            const creds = await getCredentials(adminId);
+            if (creds) {
+              await sendTextWithButtons({
+                credentials: creds,
+                mobile: session.threadId,
+                message: messageText,
+                buttons: ic?.buttons ?? [],
+              });
+            }
+          }
+
+          session.currentStepId = ic?.nextStep ?? "END";
+          session.waitingForInput = false;
+          continueLoop = false;
           break;
         }
 
@@ -78,7 +125,7 @@ export async function runWorkflow(
             session.markModified('collectedData');
             session.waitingForInput = false;
             session.currentStepId = step.nextStep ?? "END";
-            // continue loop to execute next step
+            // continue loop — next step will self-regulate via its own continueLoop logic
           }
           break;
         }
@@ -214,8 +261,9 @@ export async function runWorkflow(
       }
 
       // Safety: if we ended up at END inside the loop
-      if (session.currentStepId === "END" && continueLoop) {
+      if (session.currentStepId === "END") {
         session.done = true;
+        continueLoop = false;
         break;
       }
     }
