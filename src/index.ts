@@ -4,7 +4,7 @@ import { env } from "./config/env.js";
 import routes from "./routes/index.js";
 import connectDB from "./db/mongodb.js";
 import { ensureIndex } from "./ingestion/retriever.js";
-import { resumeDelayedWorkflows } from "./workflows/delayScheduler.js";
+import { resumeDelayedWorkflows, expireInactiveSessions } from "./workflows/delayScheduler.js";
 
 const app = express();
 
@@ -29,6 +29,7 @@ connectDB()
     });
     resumeDelayedWorkflows();
     setInterval(resumeDelayedWorkflows, 60 * 1000);
+    setInterval(expireInactiveSessions, 60 * 1000);
   })
   .catch((err) => {
     console.error("[Startup Error]", err);

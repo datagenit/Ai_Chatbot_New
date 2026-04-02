@@ -10,11 +10,13 @@ export interface IWorkflowSession extends Document {
   workflowId: string;
   currentStepId: string;
   collectedData: Map<string, string>;
-  waitingForInput: boolean;
+  waitingForInput?: boolean;
   delayUntil?: Date | null;
   done: boolean;
   startedAt: Date;
   updatedAt: Date;
+  lastActivityAt: Date;
+  expiresAt: Date | null;
 }
 
 // ── Schema ────────────────────────────────────────────────────────────────────
@@ -30,6 +32,8 @@ const WorkflowSessionSchema = new Schema<IWorkflowSession>({
   done: { type: Boolean, default: false },
   startedAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now },
+  lastActivityAt: { type: Date, default: Date.now },
+  expiresAt: { type: Date, default: null },
 });
 
 // TTL — auto-delete completed sessions after 30 days
@@ -40,6 +44,9 @@ WorkflowSessionSchema.index(
     partialFilterExpression: { done: true },
   }
 );
+
+// Sparse index for expiry scheduler query
+WorkflowSessionSchema.index({ expiresAt: 1, done: 1 });
 
 const WorkflowSession = mongoose.model<IWorkflowSession>(
   "WorkflowSession",

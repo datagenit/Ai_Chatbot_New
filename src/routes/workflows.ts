@@ -2,9 +2,83 @@ import { Router, Response } from "express";
 import { ChatGroq } from "@langchain/groq";
 import Workflow from "../models/Workflow.js";
 import WorkflowSession from "../models/WorkflowSession.js";
+import ExecutionLog from "../models/ExecutionLog.js";
+import { runWorkflow } from "../workflows/engine.js";
 import type { AuthRequest } from "../middleware/auth.js";
 
+function resolvePath(obj: unknown, path: string): string {
+  const parts = path.split(".");
+  let current: unknown = obj;
+  for (const part of parts) {
+    if (current === null || current === undefined || typeof current !== "object") return "";
+    current = (current as Record<string, unknown>)[part];
+  }
+  return current !== undefined && current !== null ? String(current) : "";
+}
+
 const router = Router();
+
+// ── POST /webhook/:webhookPath — public, no auth ───────────────────────────────
+
+router.post("/webhook/:webhookPath", async (req, res) => {
+  try {
+    const { webhookPath } = req.params;
+    const payload = req.body;
+
+    const workflows = await Workflow.find({
+      "steps.type": "webhook",
+      "steps.webhookConfig.path": webhookPath,
+    });
+
+    if (!workflows.length) {
+      res.status(404).json({ success: false, error: "No workflow found for this webhook path" });
+      return;
+    }
+
+    for (const workflow of workflows) {
+      const webhookStep = workflow.steps.find(
+        (s: any) => s.type === "webhook" && (s as any).webhookConfig?.path === webhookPath
+      );
+      if (!webhookStep) continue;
+
+      const threadId: string = payload.mobile ?? payload.phone ?? `webhook_${webhookPath}`;
+      const adminId = String((workflow as any).adminId ?? (workflow as any).admin_id ?? "");
+
+      // Close any stuck active session for this thread
+      await WorkflowSession.findOneAndUpdate(
+        { threadId, done: false },
+        { $set: { done: true } }
+      );
+
+      // Create session starting at the step AFTER the webhook step
+      const session = await WorkflowSession.create({
+        adminId,
+        threadId,
+        workflowId: workflow._id.toString(),
+        currentStepId: (webhookStep as any).nextStep ?? "END",
+        collectedData: new Map(),
+        waitingForInput: false,
+        done: false,
+      });
+
+      // Inject response mappings from webhook payload into session
+      const mapping: Record<string, unknown> = (webhookStep as any).webhookConfig?.responseMapping ?? {};
+      for (const [varName, path] of Object.entries(mapping)) {
+        const value = resolvePath(payload, path as string);
+        session.collectedData.set(varName, value);
+      }
+      session.markModified("collectedData");
+      await session.save();
+
+      await runWorkflow(threadId, adminId, "");
+    }
+
+    res.json({ success: true, message: "Webhook received and workflow triggered" });
+  } catch (err) {
+    console.error("[Webhook] error:", err instanceof Error ? err.message : err);
+    res.status(500).json({ success: false, error: "Webhook processing failed" });
+  }
+});
 
 // ── POST /generate — AI-generate a workflow from plain English ─────────────────
 
@@ -268,6 +342,58 @@ router.get("/", async (req: AuthRequest, res: Response) => {
       success: false,
       error: err instanceof Error ? err.message : "Failed to fetch workflows",
     });
+  }
+});
+
+// ── GET /runs/:runId — get single execution log (MUST be before /:id) ─────────
+
+router.get("/runs/:runId", async (req: AuthRequest, res: Response) => {
+  try {
+    const adminId = req.adminId;
+    const { runId } = req.params;
+
+    const log = await ExecutionLog.findOne({ _id: runId, adminId });
+
+    if (!log) {
+      res.status(404).json({ error: "Run not found" });
+      return;
+    }
+
+    res.json(log);
+  } catch (err) {
+    console.error("GET /workflows/runs/:runId error:", err instanceof Error ? err.message : err);
+    res.status(500).json({ error: "Failed to fetch runs" });
+  }
+});
+
+// ── GET /:workflowId/runs — paginated execution log list ──────────────────────
+
+router.get("/:workflowId/runs", async (req: AuthRequest, res: Response) => {
+  try {
+    const adminId    = req.adminId;
+    const { workflowId } = req.params;
+    const page  = Math.max(1, Number(req.query.page)  || 1);
+    const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
+    const skip  = (page - 1) * limit;
+
+    const [runs, total] = await Promise.all([
+      ExecutionLog.find({ adminId, workflowId })
+        .select("-steps")
+        .sort({ startedAt: -1 })
+        .skip(skip)
+        .limit(limit),
+      ExecutionLog.countDocuments({ adminId, workflowId }),
+    ]);
+
+    res.json({
+      runs,
+      total,
+      page,
+      pages: Math.ceil(total / limit),
+    });
+  } catch (err) {
+    console.error("GET /workflows/:workflowId/runs error:", err instanceof Error ? err.message : err);
+    res.status(500).json({ error: "Failed to fetch runs" });
   }
 });
 

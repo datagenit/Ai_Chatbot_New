@@ -143,6 +143,32 @@ export async function sendMediaMessage({
   });
 }
 
+// ── sendListMessage ───────────────────────────────────────────────────────────
+
+interface SendListMessageParams {
+  credentials: CPaaSCredentials;
+  mobile: string;
+  body: string;
+  buttonText: string;
+  sections: { title: string; rows: { id: string; title: string; description?: string }[] }[];
+}
+
+export async function sendListMessage({
+  credentials, mobile, body, buttonText, sections,
+}: SendListMessageParams): Promise<void> {
+  await postToCPaaS({
+    token: credentials.token,
+    user_id: credentials.userId,
+    method: "send_list_message",
+    req_from: "BOT_REPLY",
+    brand_number: credentials.brandNumber,
+    mobile,
+    content: body,
+    button_text: buttonText,
+    sections,
+  });
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 interface BrandNumberParams {

@@ -4,6 +4,7 @@ import { AIMessage } from "@langchain/core/messages";
 import adminRoutes from "./admin.js";
 import automationsRouter from "./automations.js";
 import workflowRoutes from "./workflows.js";
+import globalVariablesRouter from "./globalVariables.js";
 import { authMiddleware, AuthRequest } from "../middleware/auth.js";
 import { runAutomations } from "../automations/engine.js";
 import UsageLog from "../models/UsageLog.js";
@@ -181,5 +182,8 @@ router.use("/automations", authMiddleware, automationsRouter);
 
 // Workflow routes
 router.use("/workflows", authMiddleware, workflowRoutes);
+
+// Global variables routes
+router.use("/globals", authMiddleware, globalVariablesRouter);
 
 export default router;

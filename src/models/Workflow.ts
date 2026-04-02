@@ -2,12 +2,35 @@ import mongoose, { Schema, Document } from "mongoose";
 
 // ── Step sub-schema ────────────────────────────────────────────────────────────
 
+const BranchSchema = new Schema(
+  {
+    label: { type: String },
+    operator: {
+      type: String,
+      enum: ["equals", "contains", "exists", "not_equals", "not_contains"],
+    },
+    value: { type: String },
+    nextStep: { type: String },
+  },
+  { _id: false }
+);
+
 const StepSchema = new Schema(
   {
     id: { type: String, required: true },
     type: {
       type: String,
-      enum: ["message", "collect_input", "api_call", "send_template", "delay", "condition", "send_interactive"],
+      enum: [
+        "message",
+        "collect_input",
+        "api_call",
+        "send_template",
+        "delay",
+        "condition",
+        "send_interactive",
+        "send_menu",
+        "loop",
+      ],
       required: true,
     },
     nextStep: { type: String },
@@ -20,8 +43,11 @@ const StepSchema = new Schema(
     inputPrompt: { type: String },
     validation: {
       type: String,
-      enum: ["text", "phone", "date", "email"],
+      enum: ["text", "phone", "date", "email", "number", "regex"],
     },
+    retryPrompt:  { type: String },
+    maxRetries:   { type: Number, default: 3 },
+    onMaxRetries: { type: String },
 
     // type: "api_call"
     apiConfig: {
@@ -33,6 +59,7 @@ const StepSchema = new Schema(
       headers: { type: Map, of: String },
       body: { type: Map, of: String },
       responseMapping: { type: Map, of: String },
+      onError: { type: String },
     },
 
     // type: "send_template"
@@ -41,6 +68,7 @@ const StepSchema = new Schema(
       templateName: { type: String },
       bodyParams: { type: Map, of: String },
       mediaUrl: { type: String },
+      onError: { type: String },
     },
 
     // type: "delay"
@@ -49,14 +77,21 @@ const StepSchema = new Schema(
     // type: "condition"
     condition: {
       variable: { type: String },
+      // legacy single-branch fields (backward compat)
       operator: {
         type: String,
-        enum: ["equals", "contains", "exists"],
+        enum: ["equals", "contains", "exists", "not_equals", "not_contains"],
       },
       value: { type: String },
       onTrue: { type: String },
       onFalse: { type: String },
+      // multi-branch fields
+      branches: [BranchSchema],
+      defaultNextStep: { type: String },
+      // fuzzy AI classification
+      fuzzy: { type: Boolean, default: false },
     },
+
     // type: "send_interactive"
     interactiveConfig: {
       message: { type: String },
@@ -69,47 +104,122 @@ const StepSchema = new Schema(
       nextStep: { type: String },
     },
 
+    // type: "send_menu"
+    menuConfig: {
+      body: { type: String },
+      buttonText: { type: String },
+      sections: [
+        {
+          title: { type: String },
+          rows: [
+            {
+              id: { type: String },
+              title: { type: String },
+              description: { type: String },
+            },
+          ],
+        },
+      ],
+      dynamicRowsKey: { type: String },
+      sectionTitle: { type: String },
+    },
+
+    // type: "loop"
+    loopConfig: {
+      targetStepId: { type: String },
+      maxIterations: { type: Number },
+      exitCondition: {
+        variable: { type: String },
+        operator: {
+          type: String,
+          enum: ["equals", "contains", "exists", "not_equals", "not_contains"],
+        },
+        value: { type: String },
+      },
+    },
   },
   { _id: false }
 );
 
-// ── Workflow interface ─────────────────────────────────────────────────────────
+// ── Workflow interfaces ────────────────────────────────────────────────────────
+
+export interface IConditionBranch {
+  label?: string;
+  operator?: "equals" | "contains" | "exists" | "not_equals" | "not_contains";
+  value?: string;
+  nextStep?: string;
+}
 
 export interface IWorkflowStep {
   id: string;
-  type: "message" | "collect_input" | "api_call" | "send_template" | "delay" | "condition" | "send_interactive";
+  type:
+    | "message"
+    | "collect_input"
+    | "api_call"
+    | "send_template"
+    | "delay"
+    | "condition"
+    | "send_interactive"
+    | "send_menu"
+    | "loop";
   nextStep?: string;
   message?: string;
   inputKey?: string;
   inputPrompt?: string;
-  validation?: "text" | "phone" | "date" | "email";
+  validation?: "text" | "phone" | "date" | "email" | "number" | "regex";
+  retryPrompt?:  string;
+  maxRetries?:   number;
+  onMaxRetries?: string;
   apiConfig?: {
     url?: string;
     method?: "GET" | "POST" | "PUT" | "PATCH";
     headers?: Map<string, string>;
     body?: Map<string, string>;
     responseMapping?: Map<string, string>;
+    onError?: string;
   };
   templateConfig?: {
     wid?: number;
     templateName?: string;
     bodyParams?: Map<string, string>;
     mediaUrl?: string;
+    onError?: string;
   };
   delayMinutes?: number;
   condition?: {
     variable?: string;
-    operator?: "equals" | "contains" | "exists";
+    // legacy
+    operator?: "equals" | "contains" | "exists" | "not_equals" | "not_contains";
     value?: string;
     onTrue?: string;
     onFalse?: string;
+    // multi-branch
+    branches?: IConditionBranch[];
+    defaultNextStep?: string;
+    // fuzzy AI classification
+    fuzzy?: boolean;
   };
   interactiveConfig?: {
     message: string;
     buttons: { id: string; title: string }[];
     nextStep: string;
   };
-
+  menuConfig?: {
+    body?: string;
+    buttonText?: string;
+    sections?: { title?: string; rows?: { id?: string; title?: string; description?: string }[] }[];
+    dynamicRowsKey?: string;
+    sectionTitle?: string;
+  };
+  loopConfig?: {
+    targetStepId?: string;
+    maxIterations?: number;
+    exitCondition?: {
+      variable?: string;
+      operator?: "equals" | "contains" | "exists" | "not_equals" | "not_contains";
+      value?: string;
+    };
+  };
 }
 
 export interface IWorkflow extends Document {
@@ -124,6 +234,8 @@ export interface IWorkflow extends Document {
   entryStepId: string;
   steps: IWorkflowStep[];
   createdAt: Date;
+  timeoutMinutes?: number;
+  expiryMessage?: string;
 }
 
 // ── Workflow schema ────────────────────────────────────────────────────────────
@@ -144,6 +256,11 @@ const WorkflowSchema = new Schema<IWorkflow>({
   entryStepId: { type: String, required: true },
   steps: [StepSchema],
   createdAt: { type: Date, default: Date.now },
+  timeoutMinutes: { type: Number, default: 30 },
+  expiryMessage: {
+    type: String,
+    default: "Your session has expired. Send 'hi' to start again.",
+  },
 });
 
 const Workflow = mongoose.model<IWorkflow>("Workflow", WorkflowSchema);
