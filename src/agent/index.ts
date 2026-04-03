@@ -1,5 +1,5 @@
 import { StateGraph, Annotation, START, END } from "@langchain/langgraph";
-import { ChatGroq } from "@langchain/groq";
+import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import {
   HumanMessage,
   AIMessage,
@@ -80,10 +80,10 @@ export async function runAgent(adminId: string, message: string, threadId: strin
       : [];
 
   // ── LLM setup ────────────────────────────────────────────────────────────
-  const llm = new ChatGroq({
-    apiKey: env.GROQ_API_KEY,
-    model: "llama-3.3-70b-versatile",
+  const llm = new ChatGoogleGenerativeAI({
+    model: "gemini-2.0-flash",
     temperature: 0,
+    apiKey: env.GOOGLE_API_KEY,
   });
   const llmWithTools = toolsArray.length > 0 ? llm.bindTools(toolsArray) : llm;
 
@@ -209,7 +209,7 @@ export async function runAgent(adminId: string, message: string, threadId: strin
     UsageLog.create({
       adminId,
       threadId,
-      modelName: "llama-3.3-70b-versatile",
+      modelName: "gemini-2.0-flash",
       inputTokens,
       outputTokens,
       totalTokens,

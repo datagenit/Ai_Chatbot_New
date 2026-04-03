@@ -53,7 +53,7 @@ const ExecutionLogSchema = new Schema<IExecutionLog>({
   adminId:      { type: String, required: true, index: true },
   workflowId:   { type: String, required: true, index: true },
   workflowName: { type: String },
-  sessionId:    { type: String, required: true, index: true },
+  sessionId:    { type: String, required: true },
   threadId:     { type: String, required: true, index: true },
   startedAt:    { type: Date, default: Date.now },
   completedAt:  { type: Date, default: null },

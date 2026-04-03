@@ -1,5 +1,5 @@
 import { Router, Response } from "express";
-import { ChatGroq } from "@langchain/groq";
+import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import Workflow from "../models/Workflow.js";
 import WorkflowSession from "../models/WorkflowSession.js";
 import ExecutionLog from "../models/ExecutionLog.js";
@@ -91,10 +91,10 @@ router.post("/generate", async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    const model = new ChatGroq({
-      apiKey: process.env.GROQ_API_KEY,
-      model: "llama-3.3-70b-versatile",
+    const model = new ChatGoogleGenerativeAI({
+      model: "gemini-2.0-flash",
       temperature: 0.2,
+      apiKey: process.env.GOOGLE_API_KEY,
     });
 
     const systemPrompt = `You are a workflow builder assistant for a WhatsApp automation platform.

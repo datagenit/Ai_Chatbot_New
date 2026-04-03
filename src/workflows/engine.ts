@@ -75,7 +75,7 @@ function buildDynamicRows(
 
 // ── Fuzzy AI classifier ───────────────────────────────────────────────────────
 
-async function classifyWithGroq(
+async function classifyWithAI(
   userInput: string,
   labels: string[],
   adminId: string,
@@ -83,10 +83,11 @@ async function classifyWithGroq(
 ): Promise<string | null> {
   const startTime = Date.now();
   try {
-    const { ChatGroq } = await import("@langchain/groq");
-    const llm = new ChatGroq({
-      model: "llama-3.3-70b-versatile",
+    const { ChatGoogleGenerativeAI } = await import("@langchain/google-genai");
+    const llm = new ChatGoogleGenerativeAI({
+      model: "gemini-2.0-flash",
       temperature: 0,
+      apiKey: process.env.GOOGLE_API_KEY,
     });
     const prompt = `You are a classifier. Given the user message and a list of categories,
 reply with ONLY the single category label that best matches the user message.
@@ -111,7 +112,7 @@ Reply with only the matching category label or "none".`;
     UsageLog.create({
       adminId,
       threadId,
-      modelName: "llama-3.3-70b-versatile",
+      modelName: "gemini-2.0-flash",
       inputTokens,
       outputTokens,
       totalTokens,
@@ -126,12 +127,12 @@ Reply with only the matching category label or "none".`;
     ) ?? null;
   } catch (err) {
     const latencyMs = Date.now() - startTime;
-    console.error("[WorkflowEngine] classifyWithGroq failed:",
+    console.error("[WorkflowEngine] classifyWithAI failed:",
       err instanceof Error ? err.message : err);
     UsageLog.create({
       adminId,
       threadId,
-      modelName: "llama-3.3-70b-versatile",
+      modelName: "gemini-2.0-flash",
       inputTokens: 0,
       outputTokens: 0,
       totalTokens: 0,
@@ -676,7 +677,7 @@ export async function runWorkflow(
               const labels = cond.branches
                 .map((b: any) => b.label ?? "")
                 .filter(Boolean);
-              const matchedLabel = await classifyWithGroq(
+              const matchedLabel = await classifyWithAI(
                 varValue, labels, adminId, threadId
               );
               if (matchedLabel) {

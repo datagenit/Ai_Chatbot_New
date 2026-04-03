@@ -15,7 +15,7 @@ function getEnvOptional(key: string, defaultValue: string): string {
 export const env = {
   NODE_ENV: getEnvOptional("NODE_ENV", "development"),
   PORT: parseInt(getEnvOptional("PORT", "3000"), 10),
-  GROQ_API_KEY: getEnv("GROQ_API_KEY"),
+  GOOGLE_API_KEY: getEnv("GOOGLE_API_KEY"),
   GEMINI_API_KEY: getEnv("GEMINI_API_KEY"),
   MONGODB_URI: getEnv("MONGODB_URI"),
   JWT_SECRET: getEnv("JWT_SECRET"),
