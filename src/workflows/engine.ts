@@ -5,7 +5,7 @@ import AdminCredentials from "../models/AdminCredentials.js";
 import UsageLog from "../models/UsageLog.js";
 import ExecutionLog from "../models/ExecutionLog.js";
 import GlobalVariable from "../models/GlobalVariable.js";
-import { sendTemplate, getCredentials, sendTextMessage, sendTextWithButtons, sendListMessage } from "../services/cpaas.js";
+import { sendTemplate, getCredentials, sendTextMessage, sendTextWithButtons, sendListMessage, sendMediaMessage, assignAgent, addLabel } from "../services/cpaas.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -347,7 +347,7 @@ export async function runWorkflow(
         last_message: lastMessage,
       };
 
-      switch (step.type) {
+      switch (step.type as any) {
         // ── message ─────────────────────────────────────────────────────────
         case "message": {
           await logStepEntry(executionLogId, step.id, step.type, lastMessage);
@@ -804,6 +804,133 @@ export async function runWorkflow(
           }
           // loop does NOT set continueLoop = false — continues executing
           await logStepExit(executionLogId, "completed", `iteration ${currentCount + 1}/${maxIter}`, session.currentStepId, 0);
+          break;
+        }
+
+        // ── send_media ────────────────────────────────────────────────────────────
+        case "send_media": {
+          await logStepEntry(executionLogId, step.id, step.type, lastMessage);
+
+          const mediaType = (step as any).mediaType ?? "image";
+          const mediaUrl  = interpolate((step as any).mediaUrl ?? "", data);
+          const caption   = interpolate((step as any).caption  ?? "", data);
+          const filename  = (step as any).filename ?? "";
+
+          // Map frontend mediaType → CPaaS messageType
+          const messageType =
+            mediaType === "video"    ? "VIDEO" :
+            mediaType === "document" ? "file"  :
+            "IMAGE";
+
+          let mediaErrorLogged = false;
+
+          try {
+            if (!mediaUrl) {
+              console.warn("[WorkflowEngine] send_media: no mediaUrl, skipping");
+            } else if (/^\d{10,15}$/.test(threadId)) {
+              const creds = await getCredentials(adminId);
+              if (creds) {
+                await sendMediaMessage({
+                  credentials: creds,
+                  mobile: session.threadId,
+                  mediaUrl,
+                  messageType,
+                  caption: mediaType !== "document" ? caption : filename,
+                });
+              }
+            }
+          } catch (mediaErr) {
+            console.error(
+              "[WorkflowEngine] send_media failed:",
+              mediaErr instanceof Error ? mediaErr.message : mediaErr
+            );
+            const errMsg = mediaErr instanceof Error ? mediaErr.message : String(mediaErr);
+            mediaErrorLogged = true;
+            await logStepExit(
+              executionLogId, "error",
+              `send_media: ${mediaType} ${mediaUrl.slice(0, 40)}`,
+              step.nextStep ?? "END", 0, errMsg
+            );
+          }
+
+          outboundMsg = mediaUrl || null;
+          session.currentStepId = step.nextStep ?? "END";
+          continueLoop = false;
+
+          if (!mediaErrorLogged) {
+            await logStepExit(
+              executionLogId, "completed",
+              `send_media: ${mediaType} ${mediaUrl.slice(0, 40)}`,
+              session.currentStepId, 0
+            );
+          }
+          break;
+        }
+
+        // ── assign_agent ─────────────────────────────────────────────────────────
+        case "assign_agent": {
+          await logStepEntry(executionLogId, step.id, step.type, lastMessage);
+
+          try {
+            const creds = await getCredentials(adminId);
+            const adminDoc = await AdminCredentials.findOne({ adminId });
+
+            if (!creds || !adminDoc) {
+              console.warn("[WorkflowEngine] assign_agent: missing credentials, skipping");
+            } else {
+              const agentType  = (step as any).agentType  ?? "agent";
+              const agentValue = (step as any).agentValue ?? "";
+              const agentEmail = (step as any).agentEmail ?? (adminDoc as any).email ?? "";
+
+              await assignAgent({
+                user_id: creds.userId,
+                token:   creds.token,
+                email:   agentEmail,
+                mobile:  session.threadId,
+                value:   agentValue,
+                type:    agentType,
+              });
+            }
+          } catch (agentErr) {
+            console.error(
+              "[WorkflowEngine] assign_agent failed:",
+              agentErr instanceof Error ? agentErr.message : agentErr
+            );
+          }
+
+          session.currentStepId = step.nextStep ?? "END";
+          await logStepExit(executionLogId, "completed", "assign_agent", session.currentStepId, 0);
+          break;
+        }
+
+        // ── assign_label ─────────────────────────────────────────────────────────
+        case "assign_label": {
+          await logStepEntry(executionLogId, step.id, step.type, lastMessage);
+
+          try {
+            const creds = await getCredentials(adminId);
+
+            if (!creds) {
+              console.warn("[WorkflowEngine] assign_label: missing credentials, skipping");
+            } else {
+              const labelId = (step as any).labelId ?? "";
+
+              await addLabel({
+                user_id: creds.userId,
+                token:   creds.token,
+                mobile:  session.threadId,
+                value:   labelId,
+              });
+            }
+          } catch (labelErr) {
+            console.error(
+              "[WorkflowEngine] assign_label failed:",
+              labelErr instanceof Error ? labelErr.message : labelErr
+            );
+          }
+
+          session.currentStepId = step.nextStep ?? "END";
+          await logStepExit(executionLogId, "completed", "assign_label", session.currentStepId, 0);
           break;
         }
 

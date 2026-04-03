@@ -1,3 +1,4 @@
+import cron, { type TaskOptions } from "node-cron";
 import WorkflowSession from "../models/WorkflowSession.js";
 import Workflow from "../models/Workflow.js";
 import ExecutionLog from "../models/ExecutionLog.js";
@@ -111,3 +112,42 @@ export async function expireInactiveSessions(): Promise<void> {
     );
   }
 }
+
+// ── Cron jobs ─────────────────────────────────────────────
+// noOverlap: true — if the previous run is still executing
+// when the next tick fires, that tick is skipped silently.
+// This prevents stacked concurrent executions under load.
+
+const cronJobOptions = {
+  scheduled: true,
+  timezone: "UTC",
+  noOverlap: true,
+} as TaskOptions;
+
+const expireJob = cron.schedule(
+  "* * * * *", // every 1 minute
+  expireInactiveSessions,
+  cronJobOptions
+);
+
+const resumeJob = cron.schedule(
+  "* * * * *", // every 1 minute
+  resumeDelayedWorkflows,
+  cronJobOptions
+);
+
+// ── Graceful shutdown ──────────────────────────────────────
+// Stops both jobs cleanly on process termination so no job
+// fires mid-shutdown and corrupts session state.
+
+function stopScheduler(signal: string): void {
+  console.log(`[Scheduler] ${signal} received — stopping cron jobs`);
+  expireJob.stop();
+  resumeJob.stop();
+  console.log("[Scheduler] All cron jobs stopped");
+}
+
+process.on("SIGTERM", () => stopScheduler("SIGTERM"));
+process.on("SIGINT", () => stopScheduler("SIGINT"));
+
+console.log("[Scheduler] Cron jobs started (expiry: 1min | resume: 1min)");

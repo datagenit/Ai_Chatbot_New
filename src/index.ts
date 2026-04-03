@@ -4,8 +4,6 @@ import { env } from "./config/env.js";
 import routes from "./routes/index.js";
 import connectDB from "./db/mongodb.js";
 import { ensureIndex } from "./ingestion/retriever.js";
-import { resumeDelayedWorkflows, expireInactiveSessions } from "./workflows/delayScheduler.js";
-
 const app = express();
 
 app.use(cors({
@@ -27,9 +25,6 @@ connectDB()
     app.listen(env.PORT, () => {
       console.log(`Server listening on http://localhost:${env.PORT}`);
     });
-    resumeDelayedWorkflows();
-    setInterval(resumeDelayedWorkflows, 60 * 1000);
-    setInterval(expireInactiveSessions, 60 * 1000);
   })
   .catch((err) => {
     console.error("[Startup Error]", err);

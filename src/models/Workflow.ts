@@ -30,6 +30,7 @@ const StepSchema = new Schema(
         "send_interactive",
         "send_menu",
         "loop",
+        "send_media",
       ],
       required: true,
     },
@@ -37,6 +38,12 @@ const StepSchema = new Schema(
 
     // type: "message"
     message: { type: String },
+
+    // type: "send_media"
+    mediaType: { type: String, default: "image" },
+    mediaUrl:  { type: String, default: "" },
+    caption:   { type: String, default: "" },
+    filename:  { type: String, default: "" },
 
     // type: "collect_input"
     inputKey: { type: String },
@@ -161,9 +168,14 @@ export interface IWorkflowStep {
     | "condition"
     | "send_interactive"
     | "send_menu"
-    | "loop";
+    | "loop"
+    | "send_media";
   nextStep?: string;
   message?: string;
+  mediaType?: string;
+  mediaUrl?: string;
+  caption?: string;
+  filename?: string;
   inputKey?: string;
   inputPrompt?: string;
   validation?: "text" | "phone" | "date" | "email" | "number" | "regex";
