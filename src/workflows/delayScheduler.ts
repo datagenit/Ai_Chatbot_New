@@ -28,7 +28,7 @@ export async function resumeDelayedWorkflows(): Promise<void> {
       delayUntil: { $ne: null, $lte: now },
       waitingForInput: false,
     });
-    console.log(`[DelayScheduler] found ${sessions.length} sessions to resume`);
+    // console.log(`[DelayScheduler] found ${sessions.length} sessions to resume`);
     for (const session of sessions) {
       session.delayUntil = null;           // ← null, not undefined
       session.markModified('delayUntil');  // ← force Mongoose to persist it
@@ -63,7 +63,7 @@ export async function expireInactiveSessions(): Promise<void> {
       expiresAt: { $ne: null, $lte: now },
     });
 
-    console.log(`[DelayScheduler] found ${sessions.length} expired sessions`);
+    // console.log(`[DelayScheduler] found ${sessions.length} expired sessions`);
 
     for (const session of sessions) {
       try {
