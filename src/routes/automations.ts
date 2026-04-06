@@ -60,7 +60,7 @@ router.get("/credentials", async (req: AuthRequest, res: Response) => {
       { token: 0 }   // exclude token from projection
     );
 
-    res.json({ success: true, data: credentials });
+    res.status(200).json({ success: true, data: credentials });
   } catch (err) {
     console.error("GET /automations/credentials error:", err);
     res.status(500).json({
