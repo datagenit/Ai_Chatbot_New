@@ -51,9 +51,14 @@ router.post("/chat", chatLimiter, authMiddleware, async (req: AuthRequest, res) 
     console.log('[Chat] activeSession:', !!activeSession, activeSession ? `stepId: ${activeSession.currentStepId} | waiting: ${activeSession.waitingForInput}` : '');
     if (activeSession) {
       try {
-        const wfResponse = await runWorkflow(threadId, adminId, input);
-        console.log('[Chat] wfResponse:', wfResponse);
-        res.json({ success: true, response: wfResponse ?? "", threadId });
+        const wfResult = await runWorkflow(threadId, adminId, input);
+        console.log("[Chat] wfResult:", wfResult);
+        res.json({
+          success: true,
+          response: wfResult.sentViaCpaas ? "" : (wfResult.text ?? ""),
+          preview: wfResult.sentViaCpaas ? (wfResult.text ?? null) : null,
+          threadId,
+        });
         return;
       } catch (wfErr) {
         console.error("[Workflow] engine error, falling through to agent:", wfErr);
@@ -85,8 +90,13 @@ router.post("/chat", chatLimiter, authMiddleware, async (req: AuthRequest, res) 
             waitingForInput: false,
             done: false,
           });
-          const wfResponse = await runWorkflow(threadId, adminId, input);
-          res.json({ success: true, response: wfResponse ?? "", threadId });
+          const wfResult = await runWorkflow(threadId, adminId, input);
+          res.json({
+            success: true,
+            response: wfResult.sentViaCpaas ? "" : (wfResult.text ?? ""),
+            preview: wfResult.sentViaCpaas ? (wfResult.text ?? null) : null,
+            threadId,
+          });
           return;
         } catch (wfErr) {
           console.error("[Workflow] engine error, falling through to agent:", wfErr);

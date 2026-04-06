@@ -34,15 +34,15 @@ export async function resumeDelayedWorkflows(): Promise<void> {
       session.markModified('delayUntil');  // ← force Mongoose to persist it
       await session.save();
 
-      const reply = await runWorkflow(session.threadId, session.adminId, "");
-      console.log("[DelayScheduler] runWorkflow reply:", reply);
-      if (reply) {
+      const wfResult = await runWorkflow(session.threadId, session.adminId, "");
+      console.log("[DelayScheduler] runWorkflow result:", wfResult);
+      if (wfResult.text && !wfResult.sentViaCpaas) {
         const creds = await getCredentials(session.adminId);
         if (creds) {
           await sendTextMessage({
             credentials: creds,
             mobile: session.threadId,
-            message: reply,
+            message: wfResult.text,
           });
         }
       }

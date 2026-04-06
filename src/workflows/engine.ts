@@ -252,22 +252,22 @@ export async function runWorkflow(
   threadId: string,
   adminId: string,
   lastMessage: string
-): Promise<string | null> {
+): Promise<{ text: string | null; sentViaCpaas: boolean }> {
   try {
     const session = await WorkflowSession.findOne({ threadId, done: false });
-    if (!session) return null;
+    if (!session) return { text: null, sentViaCpaas: false };
 
     if (session.currentStepId === "END") {
       session.done = true;
       await session.save();
-      return null;
+      return { text: null, sentViaCpaas: false };
     }
 
     const workflow = await Workflow.findById(session.workflowId);
     if (!workflow) {
       session.done = true;
       await session.save();
-      return null;
+      return { text: null, sentViaCpaas: false };
     }
 
     // Load workflow settings for timeout, then reset expiry on every user interaction
@@ -320,6 +320,7 @@ export async function runWorkflow(
     }
 
     let outboundMsg: string | null = null;
+    let sentViaCpaas = false;
     let continueLoop = true;
 
     while (continueLoop) {
@@ -364,6 +365,7 @@ export async function runWorkflow(
                 mobile: session.threadId,
                 message: messageText,
               });
+              sentViaCpaas = true;
             }
           }
 
@@ -417,6 +419,7 @@ export async function runWorkflow(
                   mobile: session.threadId,
                   message: promptText,
                 });
+                sentViaCpaas = true;
               }
             }
             session.waitingForInput = true;
@@ -487,6 +490,7 @@ export async function runWorkflow(
                   mobile: session.threadId,
                   message: exhaustedMsg,
                 });
+                sentViaCpaas = true;
               }
             }
             session.done = true;
@@ -507,6 +511,7 @@ export async function runWorkflow(
                 mobile: session.threadId,
                 message: retryMsg,
               });
+              sentViaCpaas = true;
             }
           }
           session.collectedData.set(retryKey, String(currentRetries + 1));
@@ -616,6 +621,7 @@ export async function runWorkflow(
                 createdByName: "AI Agent",
                 createdById: credentials.user_id,
               });
+              sentViaCpaas = true;
             }
           } catch (tmplErr) {
             console.error(
@@ -757,6 +763,7 @@ export async function runWorkflow(
                     })),
                   })),
                 });
+                sentViaCpaas = true;
               } catch (menuErr) {
                 console.error("[WorkflowEngine] send_menu failed:",
                   menuErr instanceof Error ? menuErr.message : menuErr);
@@ -838,6 +845,7 @@ export async function runWorkflow(
                   messageType,
                   caption: mediaType !== "document" ? caption : filename,
                 });
+                sentViaCpaas = true;
               }
             }
           } catch (mediaErr) {
@@ -970,9 +978,9 @@ export async function runWorkflow(
     console.log("[Engine] saving session, delayUntil:", session.delayUntil);
     await session.save();
 
-    return outboundMsg;
+    return { text: outboundMsg, sentViaCpaas };
   } catch (err) {
     console.error("[WorkflowEngine] error:", err instanceof Error ? err.message : err);
-    return null;
+    return { text: null, sentViaCpaas: false };
   }
 }
