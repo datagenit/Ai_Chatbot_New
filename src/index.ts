@@ -7,7 +7,7 @@ import { ensureIndex } from "./ingestion/retriever.js";
 const app = express();
 
 app.use(cors({
-  origin: "http://localhost:3000", // Vite dev server default port
+  origin: "*", // Vite dev server default port
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
   allowedHeaders: ["Content-Type", "Authorization"],
 }));
@@ -23,7 +23,7 @@ connectDB()
   .then(() => ensureIndex())
   .then(() => {
     app.listen(env.PORT, () => {
-      console.log(`Server listening on http://localhost:${env.PORT}`);
+      console.log(`Server listening on ${env.PORT}`);
     });
   })
   .catch((err) => {
