@@ -60,14 +60,6 @@ router.get("/credentials", async (req: AuthRequest, res: Response) => {
       { token: 0 }   // exclude token from projection
     );
 
-    if (!credentials) {
-      res.status(404).json({
-        success: false,
-        error: "No CPaaS credentials found for this admin",
-      });
-      return;
-    }
-
     res.json({ success: true, data: credentials });
   } catch (err) {
     console.error("GET /automations/credentials error:", err);
