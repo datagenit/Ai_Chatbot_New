@@ -5,7 +5,7 @@ import routes from "./routes/index.js";
 import connectDB from "./db/mongodb.js";
 import { ensureIndex } from "./ingestion/retriever.js";
 const app = express();
-
+app.set('trust proxy', 1);
 app.use(cors({
   origin: "*", // Vite dev server default port
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
