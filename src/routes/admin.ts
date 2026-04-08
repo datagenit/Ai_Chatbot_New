@@ -32,10 +32,36 @@ const storage = multer.diskStorage({
   },
 });
 
-const upload = multer({ storage });
+const upload = multer({
+  storage,
+  limits: {
+    fileSize: 50 * 1024 * 1024, // 50MB
+  },
+  fileFilter: (_req, file, cb) => {
+    const allowedExtensions = ['.pdf', '.txt', '.docx', '.csv'];
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (allowedExtensions.includes(ext)) {
+      cb(null, true);
+    } else {
+      cb(new Error(`File type ${ext} is not allowed`));
+    }
+  },
+});
 
 // ── POST /api/admin/upload ──────────────────────────────────────────────────
-router.post("/upload", upload.single("file"), async (req: AuthRequest, res: Response) => {
+router.post("/upload", (req: AuthRequest, res: Response, next) => {
+  upload.single("file")(req, res as any, (err) => {
+    if (err instanceof multer.MulterError && err.code === "LIMIT_FILE_SIZE") {
+      res.status(413).json({ success: false, error: "File too large. Maximum allowed size is 50MB." });
+      return;
+    }
+    if (err) {
+      res.status(400).json({ success: false, error: err.message });
+      return;
+    }
+    next();
+  });
+}, async (req: AuthRequest, res: Response) => {
   try {
     if (!req.file) {
       res.status(400).json({ success: false, error: "No file uploaded" });
