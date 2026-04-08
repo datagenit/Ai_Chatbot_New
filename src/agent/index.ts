@@ -81,7 +81,7 @@ export async function runAgent(adminId: string, message: string, threadId: strin
 
   // ── LLM setup ────────────────────────────────────────────────────────────
   const llm = new ChatGoogleGenerativeAI({
-    model: "gemini-2.0-flash",
+    model: "gemini-2.0-flash-lite",
     temperature: 0,
     apiKey: env.GOOGLE_API_KEY,
   });
