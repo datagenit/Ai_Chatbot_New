@@ -15,6 +15,7 @@ import UploadedFile from "../models/UploadedFile.js";
 import UsageLog from "../models/UsageLog.js";
 import type { AuthRequest } from "../middleware/auth.js";
 import Conversation from "../models/Conversation.js";
+import MissedQuery from "../models/MissedQuery.js";
 
 const router = Router();
 
@@ -787,6 +788,51 @@ router.delete("/usage", async (req: AuthRequest, res: Response) => {
     res.status(500).json({
       success: false,
       error: err instanceof Error ? err.message : "Failed to clear usage logs",
+    });
+  }
+});
+
+// ── GET /api/admin/missed-queries ─────────────────────────────────────────────
+router.get("/missed-queries", async (req: AuthRequest, res: Response) => {
+  try {
+    const adminId = req.adminId!;
+    const { from, to, limit: limitParam } = req.query as {
+      from?: string;
+      to?: string;
+      limit?: string;
+    };
+
+    const match: Record<string, unknown> = { adminId };
+    const dateFilter: Record<string, Date> = {};
+    if (from) dateFilter.$gte = new Date(from);
+    if (to) dateFilter.$lte = new Date(to);
+    if (Object.keys(dateFilter).length) match.createdAt = dateFilter;
+
+    const limitVal = Math.min(parseInt(limitParam ?? "50", 10) || 50, 200);
+
+    const queries = await MissedQuery.find(match)
+      .sort({ createdAt: -1 })
+      .limit(limitVal)
+      .select("_id query threadId source createdAt");
+
+    res.json({ success: true, data: queries, total: queries.length });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: err instanceof Error ? err.message : "Failed to fetch missed queries",
+    });
+  }
+});
+
+// ── DELETE /api/admin/missed-queries ──────────────────────────────────────────
+router.delete("/missed-queries", async (req: AuthRequest, res: Response) => {
+  try {
+    await MissedQuery.deleteMany({ adminId: req.adminId });
+    res.json({ success: true, message: "Missed queries cleared" });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: err instanceof Error ? err.message : "Failed to clear missed queries",
     });
   }
 });

@@ -92,7 +92,7 @@ router.post("/generate", async (req: AuthRequest, res: Response) => {
     }
 
     const model = new ChatGoogleGenerativeAI({
-      model: "gemini-2.0-flash",
+      model: "gemini-2.5-flash",
       temperature: 0.2,
       apiKey: process.env.GOOGLE_API_KEY,
     });

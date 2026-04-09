@@ -158,7 +158,7 @@ router.post("/chat", chatLimiter, authMiddleware, async (req: AuthRequest, res) 
       UsageLog.create({
         adminId: req.adminId!,
         threadId: _tid,
-        modelName: "llama-3.3-70b-versatile",
+        modelName: "gemini-2.5-flash",
         inputTokens: 0,
         outputTokens: 0,
         totalTokens: 0,

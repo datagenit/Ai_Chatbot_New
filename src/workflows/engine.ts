@@ -85,7 +85,7 @@ async function classifyWithAI(
   try {
     const { ChatGoogleGenerativeAI } = await import("@langchain/google-genai");
     const llm = new ChatGoogleGenerativeAI({
-      model: "gemini-2.0-flash",
+      model: "gemini-2.5-flash",
       temperature: 0,
       apiKey: process.env.GOOGLE_API_KEY,
     });
@@ -112,7 +112,7 @@ Reply with only the matching category label or "none".`;
     UsageLog.create({
       adminId,
       threadId,
-      modelName: "gemini-2.0-flash",
+      modelName: "gemini-2.5-flash",
       inputTokens,
       outputTokens,
       totalTokens,
@@ -132,7 +132,7 @@ Reply with only the matching category label or "none".`;
     UsageLog.create({
       adminId,
       threadId,
-      modelName: "gemini-2.0-flash",
+      modelName: "gemini-2.5-flash",
       inputTokens: 0,
       outputTokens: 0,
       totalTokens: 0,

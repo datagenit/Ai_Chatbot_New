@@ -11,7 +11,7 @@ import { ToolNode } from "@langchain/langgraph/prebuilt";
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 import { retrieve } from "../ingestion/retriever.js";
-import { getCurrentDatetime, searchWeb, createTicket } from "../tools/tools.js";
+import { getCurrentDatetime, searchWeb, createTicket, logMissedQuery } from "../tools/tools.js";
 import { fetchTicketKeywords } from "../services/cpaas.js";
 import AdminConfig from "../models/AdminConfig.js";
 import AdminCredentials from "../models/AdminCredentials.js";
@@ -35,14 +35,29 @@ export async function runAgent(adminId: string, message: string, threadId: strin
 
   // ── Load conversation history ─────────────────────────────────────────────
   let conversation = await Conversation.findOne({ threadId, adminId });
-  const historyMessages: BaseMessage[] = conversation
+  // Token-aware history trimming — approx 4 chars per token, 8000 token budget
+  const TOKEN_BUDGET = 8000;
+  const CHARS_PER_TOKEN = 4;
+  const MAX_HISTORY_CHARS = TOKEN_BUDGET * CHARS_PER_TOKEN;
+
+  const rawMessages = conversation
     ? conversation.messages
-      .slice(-20)
       .filter((m) => m.content && m.content.trim() !== "")
-      .map((m) =>
-        m.role === "human" ? new HumanMessage(m.content) : new AIMessage(m.content)
-      )
     : [];
+
+  // Walk from newest to oldest, accumulate until budget exhausted
+  let charCount = 0;
+  const trimmed: typeof rawMessages = [];
+  for (let i = rawMessages.length - 1; i >= 0; i--) {
+    const msgChars = rawMessages[i].content.length;
+    if (charCount + msgChars > MAX_HISTORY_CHARS) break;
+    trimmed.unshift(rawMessages[i]);
+    charCount += msgChars;
+  }
+
+  const historyMessages: BaseMessage[] = trimmed.map((m) =>
+    m.role === "human" ? new HumanMessage(m.content) : new AIMessage(m.content)
+  );
 
   // ── Fetch admin config + credentials ─────────────────────────────────────
   const configDoc = await AdminConfig.findOne({ adminId });
@@ -65,6 +80,8 @@ export async function runAgent(adminId: string, message: string, threadId: strin
   if (config.tools.create_ticket === true) {
     toolsArray.push(createTicket);
   }
+  // Always include log_missed_query — it is always active
+  toolsArray.push(logMissedQuery);
 
   console.log(`[DEBUG] Admin: ${adminId}, Tools loaded:`, toolsArray.map((t) => t.name));
 
@@ -139,8 +156,15 @@ export async function runAgent(adminId: string, message: string, threadId: strin
 
 
   const escalationRule = config.tools.create_ticket
-    ? `\n\nEscalation policy: Always try to resolve the user's issue using the knowledge base and available tools first. Only create a support ticket if: (1) the user explicitly requests a ticket, OR (2) you have searched the knowledge base and cannot find a resolution. Never create a ticket for questions you can answer directly.`
-    : "";
+    ? `\n\nEscalation policy:
+- ALWAYS try to resolve using the knowledge base and available tools first.
+- If the knowledge base has no answer for a genuine support question, call log_missed_query ONCE (silently) before responding.
+- Only create a support ticket if: (1) the user explicitly requests a ticket, OR (2) you have searched the KB, found nothing, AND the issue clearly requires human intervention (e.g. billing dispute, technical failure, complaint).
+- NEVER offer to create a ticket for: gibberish, test messages, greetings, out-of-scope questions, or general questions you cannot answer.
+- For gibberish or unclear messages: respond with "I'm sorry, I didn't understand that. Could you please rephrase your question?" — do NOT offer a ticket.`
+    : `\n\nEscalation policy:
+- If the knowledge base has no answer for a genuine support question, call log_missed_query ONCE (silently) before responding.
+- For gibberish or unclear messages: respond with "I'm sorry, I didn't understand that. Could you please rephrase your question?" — do NOT log it as a missed query.`;
 
 
   const basePrompt = config.customSystemPrompt?.trim()
@@ -148,7 +172,7 @@ export async function runAgent(adminId: string, message: string, threadId: strin
     : "You are a helpful assistant.";
 
   const kbRestrictionLine = config.kbOnlyMode
-    ? `\n\nIMPORTANT: You MUST only answer questions using the knowledge base context provided above. If the answer is not found in the knowledge base context, respond with: "I'm sorry, I don't have information about that in my knowledge base. Would you like me to raise a support ticket?" Do NOT use your general knowledge to answer any question. Do NOT make up answers.`
+    ? `\n\nIMPORTANT: You MUST only answer questions using the knowledge base context provided above. If the answer is not found in the knowledge base context AND the question is a genuine support question, call log_missed_query silently then respond: "I'm sorry, I don't have information about that in my knowledge base." Do NOT use your general knowledge. Do NOT make up answers. Do NOT offer a ticket unless the user explicitly asks for one.`
     : "";
 
   const threadLine = `\nThe current conversation threadId (customer phone number) is: ${threadId}`;
@@ -209,7 +233,7 @@ export async function runAgent(adminId: string, message: string, threadId: strin
     UsageLog.create({
       adminId,
       threadId,
-      modelName: "gemini-2.0-flash",
+      modelName: "gemini-2.5-flash",
       inputTokens,
       outputTokens,
       totalTokens,

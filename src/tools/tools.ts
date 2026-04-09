@@ -6,6 +6,7 @@ import AdminCredentials from "../models/AdminCredentials.js";
 import { createTicketAPI } from "../services/cpaas.js";
 import AdminConfig from "../models/AdminConfig.js";
 import Conversation from "../models/Conversation.js";
+import MissedQuery from "../models/MissedQuery.js";
 
 const getCurrentDatetime = tool(
   async () => {
@@ -191,7 +192,40 @@ Priority defaults to "medium" if not specified.`,
   }
 );
 
-export const tools = [getCurrentDatetime, searchKnowledgeBase, searchWeb, createTicket];
+export const logMissedQuery = tool(
+  async ({ query, threadId }, config) => {
+    try {
+      const adminId = (config as any)?.configurable?.adminId;
+      if (!adminId) return "logged";
+
+      await MissedQuery.create({
+        adminId,
+        threadId,
+        query,
+        source: threadId.startsWith("admin-test") ? "test" : "whatsapp",
+      });
+
+      return "logged";
+    } catch {
+      return "logged";
+    }
+  },
+  {
+    name: "log_missed_query",
+    description: `Silently log a user query that could not be answered from the knowledge base or available tools. 
+Call this tool ONCE when:
+  - The knowledge base has no relevant information for the user's question
+  - The question is a genuine support/product/service question (not gibberish, greetings, or off-topic messages)
+Do NOT call this for: gibberish, test messages, greetings, or questions you can answer.
+This tool returns nothing visible to the user — your response to the user should proceed normally after calling it.`,
+    schema: z.object({
+      query: z.string().describe("The exact user question that could not be answered"),
+      threadId: z.string().describe("The conversation threadId"),
+    }),
+  }
+);
+
+export const tools = [getCurrentDatetime, searchKnowledgeBase, searchWeb, createTicket, logMissedQuery];
 
 // Export individual tools for dynamic loading
 export { getCurrentDatetime, searchKnowledgeBase, searchWeb };
