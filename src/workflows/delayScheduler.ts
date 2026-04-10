@@ -36,7 +36,7 @@ export async function resumeDelayedWorkflows(): Promise<void> {
 
       const wfResult = await runWorkflow(session.threadId, session.adminId, "");
       console.log("[DelayScheduler] runWorkflow result:", wfResult);
-      if (wfResult.text && !wfResult.sentViaCpaas) {
+      if (wfResult.text) {
         const creds = await getCredentials(session.adminId);
         if (creds) {
           await sendTextMessage({

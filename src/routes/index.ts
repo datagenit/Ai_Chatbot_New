@@ -42,7 +42,7 @@ router.post("/chat", chatLimiter, authMiddleware, async (req: AuthRequest, res) 
     // ── 1. Delay check — if thread is in a workflow delay, do nothing ─────────
     const delayed = await isThreadDelayed(threadId);
     if (delayed) {
-      res.status(200).json({ success: true, response: "", threadId });
+      res.status(200).json({ success: true, response: "", preview: null, threadId });
       return;
     }
 
@@ -51,12 +51,12 @@ router.post("/chat", chatLimiter, authMiddleware, async (req: AuthRequest, res) 
     console.log('[Chat] activeSession:', !!activeSession, activeSession ? `stepId: ${activeSession.currentStepId} | waiting: ${activeSession.waitingForInput}` : '');
     if (activeSession) {
       try {
-        const wfResult = await runWorkflow(threadId, adminId, input);
-        console.log("[Chat] wfResult:", wfResult);
+        const { text, preview } = await runWorkflow(threadId, adminId, input);
+        console.log("[Chat] wfResult:", { text, preview });
         res.json({
           success: true,
-          response: wfResult.sentViaCpaas ? "" : (wfResult.text ?? ""),
-          preview: wfResult.sentViaCpaas ? (wfResult.text ?? null) : null,
+          response: text,
+          preview: preview ?? null,
           threadId,
         });
         return;
@@ -90,11 +90,11 @@ router.post("/chat", chatLimiter, authMiddleware, async (req: AuthRequest, res) 
             waitingForInput: false,
             done: false,
           });
-          const wfResult = await runWorkflow(threadId, adminId, input);
+          const { text, preview } = await runWorkflow(threadId, adminId, input);
           res.json({
             success: true,
-            response: wfResult.sentViaCpaas ? "" : (wfResult.text ?? ""),
-            preview: wfResult.sentViaCpaas ? (wfResult.text ?? null) : null,
+            response: text,
+            preview: preview ?? null,
             threadId,
           });
           return;
@@ -109,7 +109,7 @@ router.post("/chat", chatLimiter, authMiddleware, async (req: AuthRequest, res) 
     // Run automations before the agent (threadId == mobile number)
     const automationResult = await runAutomations(adminId, input, threadId);
     if (automationResult.matched) {
-      res.json({ success: true, response: "", threadId });
+      res.json({ success: true, response: "", preview: null, threadId });
       return;
     }
 
@@ -147,7 +147,7 @@ router.post("/chat", chatLimiter, authMiddleware, async (req: AuthRequest, res) 
       }
     }
 
-    res.json({ success: true, response: finalContent, threadId });
+    res.json({ success: true, response: finalContent, preview: null, threadId });
   } catch (err) {
     console.error(err);
     const { message: _msg, threadId: _tid } = req.body as {

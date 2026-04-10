@@ -252,22 +252,22 @@ export async function runWorkflow(
   threadId: string,
   adminId: string,
   lastMessage: string
-): Promise<{ text: string | null; sentViaCpaas: boolean }> {
+): Promise<{ text: string; preview: object | null }> {
   try {
     const session = await WorkflowSession.findOne({ threadId, done: false });
-    if (!session) return { text: null, sentViaCpaas: false };
+    if (!session) return { text: "", preview: null };
 
     if (session.currentStepId === "END") {
       session.done = true;
       await session.save();
-      return { text: null, sentViaCpaas: false };
+      return { text: "", preview: null };
     }
 
     const workflow = await Workflow.findById(session.workflowId);
     if (!workflow) {
       session.done = true;
       await session.save();
-      return { text: null, sentViaCpaas: false };
+      return { text: "", preview: null };
     }
 
     // Load workflow settings for timeout, then reset expiry on every user interaction
@@ -321,6 +321,7 @@ export async function runWorkflow(
 
     let outboundMsg: string | null = null;
     let sentViaCpaas = false;
+    let lastPreview: object | null = null;
     let continueLoop = true;
 
     while (continueLoop) {
@@ -380,20 +381,37 @@ export async function runWorkflow(
           await logStepEntry(executionLogId, step.id, step.type, lastMessage);
 
           const ic = (step as any).interactiveConfig;
-          const messageText = ic?.message ?? "";
+          const messageText = interpolate(ic?.message ?? "", data);
+          const buttons = (ic?.buttons ?? []).map((b: any) => ({
+            id: b?.id ?? "",
+            title: b?.title ?? "",
+          }));
           outboundMsg = messageText;
 
           if (/^\d{10,15}$/.test(threadId)) {
             const creds = await getCredentials(adminId);
             if (creds) {
-              await sendTextWithButtons({
-                credentials: creds,
-                mobile: session.threadId,
-                message: messageText,
-                buttons: ic?.buttons ?? [],
-              });
+              try {
+                await sendTextWithButtons({
+                  credentials: creds,
+                  mobile: session.threadId,
+                  message: messageText,
+                  buttons,
+                });
+                sentViaCpaas = true;
+              } catch (interactiveErr) {
+                console.error(
+                  "[WorkflowEngine] send_interactive failed:",
+                  interactiveErr instanceof Error ? interactiveErr.message : interactiveErr
+                );
+              }
             }
           }
+          lastPreview = {
+            type: "interactive",
+            body: messageText,
+            buttons: buttons.map((b: { id: string; title: string }) => ({ id: b.id, title: b.title })),
+          };
 
           session.currentStepId = ic?.nextStep ?? "END";
           session.waitingForInput = false;
@@ -745,6 +763,16 @@ export async function runWorkflow(
             }
           }
 
+          const menuBody = interpolate(mc.body ?? "", data);
+          const menuSections = sections.map((s: any) => ({
+            title: s.title,
+            rows: (s.rows ?? []).map((r: any) => ({
+              id: r.id ?? `row_${Date.now()}`,
+              title: r.title ?? "",
+              description: r.description ?? "",
+            })),
+          }));
+
           if (/^\d{10,15}$/.test(threadId)) {
             const creds = await getCredentials(adminId);
             if (creds) {
@@ -752,16 +780,9 @@ export async function runWorkflow(
                 await sendListMessage({
                   credentials: creds,
                   mobile: threadId,
-                  body: interpolate(mc.body ?? "", data),
+                  body: menuBody,
                   buttonText: mc.buttonText ?? "Choose an option",
-                  sections: sections.map((s: any) => ({
-                    title: s.title,
-                    rows: (s.rows ?? []).map((r: any) => ({
-                      id: r.id ?? `row_${Date.now()}`,
-                      title: r.title ?? "",
-                      description: r.description ?? "",
-                    })),
-                  })),
+                  sections: menuSections,
                 });
                 sentViaCpaas = true;
               } catch (menuErr) {
@@ -771,7 +792,12 @@ export async function runWorkflow(
             }
           }
 
-          outboundMsg = mc?.body ?? null;
+          lastPreview = {
+            type: "list",
+            body: menuBody,
+            sections: menuSections,
+          };
+          outboundMsg = menuBody || null;
           session.currentStepId = step.nextStep ?? "END";
           continueLoop = false;
           await logStepExit(executionLogId, "completed", "menu sent", session.currentStepId, 0);
@@ -978,9 +1004,9 @@ export async function runWorkflow(
     console.log("[Engine] saving session, delayUntil:", session.delayUntil);
     await session.save();
 
-    return { text: outboundMsg, sentViaCpaas };
+    return { text: outboundMsg ?? "", preview: lastPreview };
   } catch (err) {
     console.error("[WorkflowEngine] error:", err instanceof Error ? err.message : err);
-    return { text: null, sentViaCpaas: false };
+    return { text: "", preview: null };
   }
 }

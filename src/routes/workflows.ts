@@ -86,8 +86,8 @@ router.post("/generate", async (req: AuthRequest, res: Response) => {
   try {
     const { description } = req.body as { description?: string };
 
-    if (!description || typeof description !== "string" || description.trim().length < 10) {
-      res.status(400).json({ error: "Please describe your workflow (min 10 characters)" });
+    if (!description || typeof description !== "string" || description.trim().length < 50 || description.trim().length > 1000) {
+      res.status(400).json({ error: "Description must be between 50 and 1000 characters" });
       return;
     }
 
@@ -98,79 +98,109 @@ router.post("/generate", async (req: AuthRequest, res: Response) => {
     });
 
     const systemPrompt = `You are a workflow builder assistant for a WhatsApp automation platform.
-Convert the user's plain English description into a valid workflow JSON object.
-
-STRICT RULES:
-- Return ONLY a raw JSON object. No markdown, no code blocks, no explanation.
-- steps[] must have sequential ids: "step_1", "step_2", "step_3" etc
-- entryStepId must always equal steps[0].id which is always "step_1"
-- Every step's nextStep must point to the next step's id, or "END" for the last step
-- Last step always has nextStep: "END"
-
-VALID STEP TYPES AND REQUIRED FIELDS:
-
-message:
-  { id, type: "message", message: "string (use {{variable}} for collected data)", nextStep }
-
-send_interactive:
-  {
-    id,
-    type: "send_interactive",
-    nextStep,
-    interactiveConfig: {
-      message: "string — the message text to show above buttons",
-      buttons: [
-        { id: "btn_1", title: "Button label (max 20 chars)" },
-        { id: "btn_2", title: "Button label (max 20 chars)" }
-      ],
-      nextStep: "same value as parent nextStep"
+    Convert the user's plain English description into a valid workflow JSON object.
+    
+    STRICT RULES:
+    - Return ONLY a raw JSON object. No markdown, no code blocks, no explanation.
+    - steps[] must have sequential ids: "step_1", "step_2", "step_3" etc
+    - entryStepId must always equal steps[0].id which is always "step_1"
+    - Every step's nextStep must point to the next step's id, or "END" for the last step
+    - Last step always has nextStep: "END"
+    
+    VALID STEP TYPES AND REQUIRED FIELDS:
+    
+    message:
+      { id, type: "message", message: "string (use {{variable}} for collected data)", nextStep }
+    
+    send_interactive:
+      {
+        id,
+        type: "send_interactive",
+        nextStep,
+        interactiveConfig: {
+          message: "string — the message text to show above buttons",
+          buttons: [
+            { id: "btn_1", title: "Button label (max 20 chars)" },
+            { id: "btn_2", title: "Button label (max 20 chars)" }
+          ],
+          nextStep: "same value as parent nextStep"
+        }
+      }
+      Note: buttons array must have 1–3 items. Button id must be unique snake_case.
+      The user's button click reply is received as the button id value.
+      Use send_interactive when the user needs to pick from a fixed set of options.
+    
+      MANDATORY RULE — after EVERY send_interactive step, you MUST insert a
+      collect_input step immediately after it (before any other logic step).
+      This collect_input captures the button the user tapped as a named variable.
+      Without it, the button choice is lost and cannot be referenced later.
+    
+      Correct pattern:
+        step_N:   send_interactive → nextStep: "step_N+1"
+        step_N+1: collect_input, inputKey: "descriptive_key_name",
+                  inputPrompt: "Got it! Let me help you with that.",
+                  validation: "text", nextStep: "step_N+2"
+        step_N+2: next logic — can now use {{descriptive_key_name}}
+    
+      The collect_input after send_interactive does NOT need to ask a real question.
+      Its inputPrompt is just a short acknowledgement like "Got it!" or "Sure!".
+      The button tap reply is automatically stored as the inputKey value.
+      Never skip this collect_input — it is always required after send_interactive.
+    
+    collect_input:
+      { id, type: "collect_input", inputKey: "snake_case_name", inputPrompt: "question to ask user", validation: "text"|"phone"|"date"|"email", nextStep }
+      - inputPrompt is the question shown to the user to collect this specific value
+      - inputKey is the variable name that stores the user's answer
+      - The prompt and key must match: prompt asks for what key stores
+      - Example: inputPrompt "What is your name?" → inputKey "user_name"
+      - Example: inputPrompt "What is your email?" → inputKey "user_email"
+    
+    api_call:
+      { id, type: "api_call", apiConfig: { url: "string", method: "GET"|"POST"|"PUT"|"PATCH", headers: {}, body: { "fieldName": "{{variable}}" }, responseMapping: { "variableName": "dot.path.in.response" } }, nextStep }
+    
+    send_template:
+      { id, type: "send_template", templateConfig: { wid: 0, templateName: "", bodyParams: { "1": "{{variable}}" }, mediaUrl: "" }, nextStep }
+    
+    delay:
+      { id, type: "delay", delayMinutes: 30, nextStep }
+    
+    condition:
+      { id, type: "condition", condition: { variable: "{{variable}}", operator: "equals"|"contains"|"exists", value: "string", onTrue: "step_id or END", onFalse: "step_id or END" } }
+      Note: condition steps do NOT have nextStep — routing is via onTrue/onFalse only
+      send_interactive steps have nextStep on the parent step AND inside interactiveConfig — both must be the same value
+    
+    TRIGGER:
+      trigger: { type: "keyword", keywords: ["extracted", "from", "description"] }
+    
+    OUTPUT FORMAT — return exactly this shape:
+    {
+      "name": "descriptive workflow name",
+      "trigger": { "type": "keyword", "keywords": ["keyword1", "keyword2"] },
+      "entryStepId": "step_1",
+      "steps": [ ...steps ]
     }
-  }
-  Note: buttons array must have 1–3 items. Button id must be unique snake_case.
-  The user's button click reply is received as the button id value.
-  Use send_interactive when the user needs to pick from a fixed set of options.
-  After send_interactive, use collect_input with inputKey to store the button choice.
-
-collect_input:
-  { id, type: "collect_input", inputKey: "snake_case_name", inputPrompt: "question to ask user", validation: "text"|"phone"|"date"|"email", nextStep }
-
-api_call:
-  { id, type: "api_call", apiConfig: { url: "string", method: "GET"|"POST"|"PUT"|"PATCH", headers: {}, body: { "fieldName": "{{variable}}" }, responseMapping: { "variableName": "dot.path.in.response" } }, nextStep }
-
-send_template:
-  { id, type: "send_template", templateConfig: { wid: 0, templateName: "", bodyParams: { "1": "{{variable}}" }, mediaUrl: "" }, nextStep }
-
-delay:
-  { id, type: "delay", delayMinutes: 30, nextStep }
-
-condition:
-  { id, type: "condition", condition: { variable: "{{variable}}", operator: "equals"|"contains"|"exists", value: "string", onTrue: "step_id or END", onFalse: "step_id or END" } }
-  Note: condition steps do NOT have nextStep — routing is via onTrue/onFalse only
-  send_interactive steps have nextStep on the parent step AND inside interactiveConfig — both must be the same value
-
-TRIGGER:
-  trigger: { type: "keyword", keywords: ["extracted", "from", "description"] }
-
-OUTPUT FORMAT — return exactly this shape:
-{
-  "name": "descriptive workflow name",
-  "trigger": { "type": "keyword", "keywords": ["keyword1", "keyword2"] },
-  "entryStepId": "step_1",
-  "steps": [ ...steps ]
-}
-
-VARIABLE USAGE:
-- Variables collected via collect_input are referenced as {{inputKey}} in later steps
-- Available built-in variables: {{user_name}}, {{user_phone}}, {{user_email}}, {{last_message}}
-- API response variables are available after api_call via responseMapping keys
-
-IMPORTANT:
-- For collect_input steps, make the inputPrompt conversational and friendly
-- Extract 2-5 relevant trigger keywords from the description
-- If the description mentions an API URL, use it exactly as given
-- If no API URL is given but an API call is implied, use "https://api.example.com/endpoint" as placeholder
-- If condition step is used, onTrue and onFalse must point to valid step ids or "END"
-- Generate a clear descriptive name for the workflow based on the description`;
+    
+    VARIABLE USAGE:
+    - Variables collected via collect_input are referenced as {{inputKey}} in later steps
+    - Variables are available in all steps AFTER the collect_input step that defines them
+    - Available built-in variables: {{user_name}}, {{user_phone}}, {{user_email}}
+    - NEVER use {{last_message}} in any step — it is internal only and must not appear in prompts or messages
+    - API response variables are available after api_call via responseMapping keys
+    
+    VARIABLE NAMING RULES:
+    - inputKey must be snake_case and descriptive of what is being collected
+    - Never reuse the same inputKey across multiple collect_input steps
+    - Button choice keys should reflect the choice context e.g. "support_category", "selected_plan"
+    
+    IMPORTANT:
+    - For collect_input steps, make the inputPrompt conversational and friendly
+    - Extract 2-5 relevant trigger keywords from the description
+    - If the description mentions an API URL, use it exactly as given
+    - If no API URL is given but an API call is implied, use "https://api.example.com/endpoint" as placeholder
+    - If condition step is used, onTrue and onFalse must point to valid step ids or "END"
+    - Generate a clear descriptive name for the workflow based on the description
+    - Always number steps sequentially with no gaps — step_1, step_2, step_3...
+    - Re-number all steps after inserting mandatory collect_input steps after send_interactive`;
 
     const response = await model.invoke([
       { role: "system", content: systemPrompt },
