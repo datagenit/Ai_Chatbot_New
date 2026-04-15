@@ -48,6 +48,10 @@ const StepSchema = new Schema(
     // type: "collect_input"
     inputKey: { type: String },
     inputPrompt: { type: String },
+    prompt: { type: String },
+    variable: { type: String },
+    validOptions: [{ type: String }],
+    saveResponseTo: { type: String },
     validation: {
       type: String,
       enum: ["text", "phone", "date", "email", "number", "regex"],
@@ -66,6 +70,12 @@ const StepSchema = new Schema(
       headers: { type: Map, of: String },
       body: { type: Map, of: String },
       responseMapping: { type: Map, of: String },
+      mappings: [
+        {
+          variable: { type: String },
+          path: { type: String },
+        },
+      ],
       onError: { type: String },
     },
 
@@ -178,6 +188,10 @@ export interface IWorkflowStep {
   filename?: string;
   inputKey?: string;
   inputPrompt?: string;
+  prompt?: string;
+  variable?: string;
+  validOptions?: string[];
+  saveResponseTo?: string;
   validation?: "text" | "phone" | "date" | "email" | "number" | "regex";
   retryPrompt?:  string;
   maxRetries?:   number;
@@ -188,6 +202,7 @@ export interface IWorkflowStep {
     headers?: Map<string, string>;
     body?: Map<string, string>;
     responseMapping?: Map<string, string>;
+    mappings?: { variable: string; path: string }[];
     onError?: string;
   };
   templateConfig?: {

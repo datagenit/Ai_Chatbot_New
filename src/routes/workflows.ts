@@ -298,12 +298,13 @@ router.post("/", async (req: AuthRequest, res: Response) => {
     for (const step of steps) {
       const type = step.type as string;
       switch (type) {
-        case "collect_input":
-          if (!step.inputKey || !step.inputPrompt) {
-            res.status(400).json({ success: false, error: `Step "${step.id}": inputKey and inputPrompt are required for collect_input` });
-            return;
+        case "collect_input": {
+          const hasVariable = (step.variable as string | undefined)?.trim() || (step.inputKey as string | undefined)?.trim();
+          if (!hasVariable) {
+            throw new Error(`Step "${step.id}": collect_input requires a variable name`);
           }
           break;
+        }
         case "api_call": {
           const cfg = step.apiConfig as Record<string, unknown> | undefined;
           if (!cfg?.url || !cfg?.method) {
@@ -327,10 +328,14 @@ router.post("/", async (req: AuthRequest, res: Response) => {
           }
           break;
         case "condition": {
-          const cond = step.condition as Record<string, unknown> | undefined;
-          if (!cond?.variable || !cond?.operator || !cond?.onTrue || !cond?.onFalse) {
-            res.status(400).json({ success: false, error: `Step "${step.id}": condition.variable, operator, onTrue, onFalse are all required` });
-            return;
+          const cond = step.condition as any;
+          const hasVariable = cond?.variable && String(cond.variable).trim().length > 0;
+          const hasBranches = Array.isArray(cond?.branches) && cond.branches.length > 0;
+          const hasLegacy = cond?.onTrue || cond?.onFalse;
+          if (!hasVariable && !hasBranches && !hasLegacy) {
+            throw new Error(
+              `Step "${step.id}": condition requires either a variable, branches, or onTrue/onFalse`
+            );
           }
           break;
         }

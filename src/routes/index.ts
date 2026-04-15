@@ -24,6 +24,7 @@ router.use(apiLimiter);
 router.use("/automations/credentials", credentialsLimiter);
 
 router.post("/chat", chatLimiter, authMiddleware, async (req: AuthRequest, res) => {
+  console.log('[CHAT] incoming message:', req.body.message, '| threadId:', req.body.threadId);
   const requestStart = Date.now();
   try {
     const { message, threadId } = req.body as {

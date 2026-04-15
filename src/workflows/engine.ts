@@ -1,4 +1,5 @@
 import axios from "axios";
+import _ from "lodash";
 import Workflow from "../models/Workflow.js";
 import WorkflowSession from "../models/WorkflowSession.js";
 import AdminCredentials from "../models/AdminCredentials.js";
@@ -9,8 +10,11 @@ import { sendTemplate, getCredentials, sendTextMessage, sendTextWithButtons, sen
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function interpolate(template: string, data: Record<string, string>): string {
-  return template.replace(/\{\{(\w+)\}\}/g, (_match, key) => data[key] ?? `{{${key}}}`);
+function resolveTemplate(text: string, variables: Record<string, unknown>): string {
+  return text.replace(/\{\{(\w+)\}\}/g, (_match, key) => {
+    const value = variables[key];
+    return value === undefined || value === null ? `{{${key}}}` : String(value);
+  });
 }
 
 function resolvePath(obj: unknown, path: string): string {
@@ -340,7 +344,7 @@ export async function runWorkflow(
 
       // Priority (lowest → highest): globals → collectedData → last_message.
       // Internal __retries_* keys are filtered; __loop_* kept for loop counter reads.
-      const data: Record<string, string> = {
+      const data: Record<string, unknown> = {
         ...globalData,
         ...Object.fromEntries(
           [...(session.collectedData ?? new Map()).entries()].filter(
@@ -355,7 +359,7 @@ export async function runWorkflow(
         case "message": {
           await logStepEntry(executionLogId, step.id, step.type, lastMessage);
 
-          const messageText = interpolate(step.message ?? "", data);
+          const messageText = resolveTemplate(step.message ?? "", data);
           outboundMsg = messageText;
 
           if (/^\d{10,15}$/.test(threadId)) {
@@ -380,163 +384,165 @@ export async function runWorkflow(
         case "send_interactive": {
           await logStepEntry(executionLogId, step.id, step.type, lastMessage);
 
-          const ic = (step as any).interactiveConfig;
-          const messageText = interpolate(ic?.message ?? "", data);
-          const buttons = (ic?.buttons ?? []).map((b: any) => ({
-            id: b?.id ?? "",
-            title: b?.title ?? "",
-          }));
-          outboundMsg = messageText;
+          const ic = step.interactiveConfig;
+          const messageText = resolveTemplate(ic?.message ?? "", data);
+          const buttons = (ic?.buttons ?? []).map((b: any) => {
+            const rawId = String(b?.id ?? b?.reply?.id ?? b?.title ?? b?.label ?? "");
+            const resolvedId = resolveTemplate(rawId, data);
+            const fallbackTitle = String(b?.title ?? b?.label ?? b?.reply?.title ?? "");
+            return {
+              id: resolvedId,
+              title: resolveTemplate(fallbackTitle, data),
+            };
+          });
 
-          if (/^\d{10,15}$/.test(threadId)) {
+          const sendInteractiveCpaas = async () => {
+            if (!/^\d{10,15}$/.test(threadId)) return;
             const creds = await getCredentials(adminId);
-            if (creds) {
-              try {
-                await sendTextWithButtons({
-                  credentials: creds,
-                  mobile: session.threadId,
-                  message: messageText,
-                  buttons,
-                });
-                sentViaCpaas = true;
-              } catch (interactiveErr) {
-                console.error(
-                  "[WorkflowEngine] send_interactive failed:",
-                  interactiveErr instanceof Error ? interactiveErr.message : interactiveErr
-                );
-              }
+            if (!creds) return;
+            try {
+              await sendTextWithButtons({
+                credentials: creds,
+                mobile: session.threadId,
+                message: messageText,
+                buttons,
+              });
+              sentViaCpaas = true;
+            } catch (interactiveErr) {
+              console.error(
+                "[WorkflowEngine] send_interactive failed:",
+                interactiveErr instanceof Error ? interactiveErr.message : interactiveErr
+              );
             }
-          }
-          lastPreview = {
-            type: "interactive",
-            body: messageText,
-            buttons: buttons.map((b: { id: string; title: string }) => ({ id: b.id, title: b.title })),
           };
 
-          session.currentStepId = ic?.nextStep ?? "END";
+          if (!session.waitingForInput || session.currentStepId !== step.id) {
+            outboundMsg = messageText;
+            lastPreview = {
+              type: "interactive",
+              body: messageText,
+              buttons: buttons.map((b: { id: string; title: string }) => ({ id: b.id, title: b.title })),
+            };
+            await sendInteractiveCpaas();
+            session.waitingForInput = true;
+            session.currentStepId = step.id;
+            continueLoop = false;
+            await logStepExit(executionLogId, "waiting", "waiting for selection", session.currentStepId, 0);
+            break;
+          }
+
+          const rawInput = String(lastMessage ?? "").trim();
+          const buttonIds = buttons.map((b: { id: string }) => String(b.id).toLowerCase());
+          const labelMap: Record<string, string> = {};
+          buttons.forEach((b: { id: string; title: string }) => {
+            const id = String(b.id || b.title);
+            const label = String(b.title || b.id);
+            labelMap[id.toLowerCase()] = label;
+          });
+
+          if (buttonIds.length > 0 && !buttonIds.includes(rawInput.toLowerCase())) {
+            await sendInteractiveCpaas();
+            outboundMsg = messageText;
+            lastPreview = {
+              type: "interactive",
+              body: messageText,
+              buttons: buttons.map((b: { id: string; title: string }) => ({ id: b.id, title: b.title })),
+            };
+            session.waitingForInput = true;
+            session.currentStepId = step.id;
+            continueLoop = false;
+            await logStepExit(executionLogId, "waiting", "invalid selection", session.currentStepId, 0);
+            break;
+          }
+
+          const resolvedLabel = labelMap[rawInput.toLowerCase()] ?? rawInput;
+          const autoReplyKey = `__menu_reply_${step.id}`;
+          session.collectedData.set(autoReplyKey, rawInput);
+          session.collectedData.set(`${autoReplyKey}_title`, resolvedLabel);
+          if (step.saveResponseTo) {
+            session.collectedData.set(step.saveResponseTo, resolvedLabel);
+          }
+          session.markModified("collectedData");
           session.waitingForInput = false;
-          continueLoop = false;
-          await logStepExit(executionLogId, "completed", "interactive sent", session.currentStepId, 0);
+          session.currentStepId = step.nextStep ?? "END";
+          continueLoop = true;
+          await logStepExit(executionLogId, "completed", "interactive selection", session.currentStepId, 0);
           break;
         }
 
         // ── collect_input ────────────────────────────────────────────────────
         case "collect_input": {
           await logStepEntry(executionLogId, step.id, step.type, lastMessage);
-          const retryKey = `__retries_${step.id}`;
 
-          // STEP A — First visit: send prompt and wait for user reply
-          if (!session.waitingForInput) {
-            const promptText = interpolate(step.inputPrompt ?? "", data);
-            outboundMsg = promptText;
-            if (/^\d{10,15}$/.test(threadId)) {
-              const creds = await getCredentials(adminId);
-              if (creds) {
-                await sendTextMessage({
-                  credentials: creds,
-                  mobile: session.threadId,
-                  message: promptText,
-                });
-                sentViaCpaas = true;
+          const promptText = resolveTemplate(step.prompt ?? step.inputPrompt ?? "", data);
+          const varKey = step.variable ?? step.inputKey ?? "input";
+
+          if (!session.waitingForInput || session.currentStepId !== step.id) {
+            if (promptText) {
+              outboundMsg = promptText;
+              lastPreview = { type: "text", body: promptText };
+              if (/^\d{10,15}$/.test(threadId)) {
+                const creds = await getCredentials(adminId);
+                if (creds) {
+                  await sendTextMessage({
+                    credentials: creds,
+                    mobile: session.threadId,
+                    message: promptText,
+                  });
+                  sentViaCpaas = true;
+                }
               }
             }
             session.waitingForInput = true;
-            session.currentStepId = step.id; // stay on this step
+            session.currentStepId = step.id;
             continueLoop = false;
             await logStepExit(executionLogId, "waiting", "waiting for input", session.currentStepId, 0);
             break;
           }
 
-          // STEP B — User replied, no validation configured: store and advance
-          if (!step.validation) {
-            session.collectedData.set(step.inputKey ?? "input", lastMessage);
-            session.markModified("collectedData");
-            session.waitingForInput = false;
-            session.currentStepId = step.nextStep ?? "END";
-            await logStepExit(executionLogId, "completed", `collected: ${step.inputKey ?? "input"}`, session.currentStepId, 0);
-            // continue loop — next step self-regulates
-            break;
-          }
+          const rawInput = String(lastMessage ?? "").trim();
+          const validOptions = Array.isArray(step.validOptions)
+            ? (step.validOptions as string[])
+            : [];
 
-          // STEP C — User replied with validation configured
-          const isValid = evaluateValidation(
-            lastMessage,
-            step.validation as string,
-            step as unknown as Record<string, unknown>
-          );
-
-          if (isValid) {
-            session.collectedData.set(step.inputKey ?? "input", lastMessage);
-            session.collectedData.delete(retryKey);
-            session.markModified("collectedData");
-            session.waitingForInput = false;
-            session.currentStepId = step.nextStep ?? "END";
-            continueLoop = !!step.nextStep;
-            await logStepExit(executionLogId, "completed", `collected: ${step.inputKey ?? "input"}`, session.currentStepId, 0);
-            break;
-          }
-
-          // INVALID INPUT — retry logic
-          const currentRetries = Number(
-            session.collectedData.get(retryKey) ?? 0
-          );
-          const limit = Math.min(Math.max(step.maxRetries ?? 3, 1), 10);
-
-          if (currentRetries >= limit) {
-            // Retries exhausted
-            session.collectedData.delete(retryKey);
-            session.markModified("collectedData");
-            session.waitingForInput = false;
-
-            if (step.onMaxRetries) {
-              // Route to designated error-handler step immediately
-              session.currentStepId = step.onMaxRetries;
-              continueLoop = true;
-              await logStepExit(executionLogId, "error", `max retries reached`, session.currentStepId, currentRetries + 1);
-              break; // do NOT fall through to nextStep
-            }
-
-            // No error handler — send default message, close session
-            const exhaustedMsg =
-              "Sorry, I couldn't understand your input. Please try again later.";
-            outboundMsg = exhaustedMsg;
-            if (/^\d{10,15}$/.test(threadId)) {
-              const creds = await getCredentials(adminId);
-              if (creds) {
-                await sendTextMessage({
-                  credentials: creds,
-                  mobile: session.threadId,
-                  message: exhaustedMsg,
-                });
-                sentViaCpaas = true;
+          if (validOptions.length > 0) {
+            const lowered = validOptions.map((v) => v.toLowerCase());
+            if (!lowered.includes(rawInput.toLowerCase())) {
+              if (promptText) {
+                outboundMsg = promptText;
+                lastPreview = { type: "text", body: promptText };
+                if (/^\d{10,15}$/.test(threadId)) {
+                  const creds = await getCredentials(adminId);
+                  if (creds) {
+                    await sendTextMessage({
+                      credentials: creds,
+                      mobile: session.threadId,
+                      message: promptText,
+                    });
+                    sentViaCpaas = true;
+                  }
+                }
               }
+              session.waitingForInput = true;
+              session.currentStepId = step.id;
+              continueLoop = false;
+              await logStepExit(executionLogId, "waiting", "invalid selection", session.currentStepId, 0);
+              break;
             }
-            session.done = true;
-            continueLoop = false;
-            await logStepExit(executionLogId, "error", `max retries reached`, null, currentRetries + 1);
-            break;
           }
 
-          // Retries not yet exhausted — send retry prompt and stay on step
-          const retryMsg =
-            step.retryPrompt ?? "That doesn't look right. Please try again.";
-          outboundMsg = retryMsg;
-          if (/^\d{10,15}$/.test(threadId)) {
-            const creds = await getCredentials(adminId);
-            if (creds) {
-              await sendTextMessage({
-                credentials: creds,
-                mobile: session.threadId,
-                message: retryMsg,
-              });
-              sentViaCpaas = true;
-            }
-          }
-          session.collectedData.set(retryKey, String(currentRetries + 1));
+          session.collectedData.set(varKey, rawInput);
           session.markModified("collectedData");
-          session.currentStepId = step.id; // stay on this step
-          continueLoop = false;
-          await logStepExit(executionLogId, "waiting", `retry ${currentRetries + 1}/${limit}`, session.currentStepId, currentRetries + 1);
+          session.waitingForInput = false;
+          session.currentStepId = step.nextStep ?? "END";
+          continueLoop = true;
+          await logStepExit(
+            executionLogId,
+            "completed",
+            `collected: ${varKey}`,
+            session.currentStepId,
+            0
+          );
           break;
         }
 
@@ -555,17 +561,17 @@ export async function runWorkflow(
               break;
             }
 
-            const resolvedUrl = interpolate(cfg.url, data);
+            const resolvedUrl = resolveTemplate(cfg.url, data);
             apiLogOutput = `${cfg.method} ${resolvedUrl}`;
 
             const resolvedHeaders: Record<string, string> = {};
             for (const [k, v] of (cfg.headers ?? new Map()).entries()) {
-              resolvedHeaders[k] = interpolate(v, data);
+              resolvedHeaders[k] = resolveTemplate(v, data);
             }
 
             const resolvedBody: Record<string, string> = {};
             for (const [k, v] of (cfg.body ?? new Map()).entries()) {
-              resolvedBody[k] = interpolate(v, data);
+              resolvedBody[k] = resolveTemplate(v, data);
             }
 
             const response = await axios({
@@ -579,6 +585,26 @@ export async function runWorkflow(
             for (const [varName, path] of (cfg.responseMapping ?? new Map()).entries()) {
               const resolved = resolvePath(response.data, path);
               session.collectedData.set(varName, resolved);
+            }
+            const mappings = Array.isArray((cfg as any).mappings)
+              ? ((cfg as any).mappings as Array<{ variable?: string; path?: string }>)
+              : [];
+            for (const mapping of mappings) {
+              if (!mapping?.variable || !mapping?.path) continue;
+              const mappedValue = _.get(response.data, mapping.path);
+              session.collectedData.set(
+                mapping.variable,
+                mappedValue == null
+                  ? ""
+                  : (typeof mappedValue === "string" ? mappedValue : JSON.stringify(mappedValue))
+              );
+            }
+            const responseBody =
+              typeof response.data === "string"
+                ? response.data
+                : JSON.stringify(response.data);
+            if (step.saveResponseTo) {
+              session.collectedData.set(step.saveResponseTo, responseBody);
             }
             session.markModified("collectedData");
           } catch (apiErr) {
@@ -623,7 +649,7 @@ export async function runWorkflow(
             if (credentials) {
               const resolvedBodyParams: Record<string, string> = {};
               for (const [k, v] of (tc.bodyParams ?? new Map()).entries()) {
-                resolvedBodyParams[k] = interpolate(v, data);
+                resolvedBodyParams[k] = resolveTemplate(v, data);
               }
 
               await sendTemplate({
@@ -634,7 +660,7 @@ export async function runWorkflow(
                 templateName: tc.templateName,
                 bodyParams: resolvedBodyParams,
                 headerParams: {},
-                mediaUrl: interpolate(tc.mediaUrl ?? "", data),
+                mediaUrl: resolveTemplate(tc.mediaUrl ?? "", data),
                 brandNumber: credentials.brandNumber ?? "",
                 createdByName: "AI Agent",
                 createdById: credentials.user_id,
@@ -689,7 +715,7 @@ export async function runWorkflow(
           }
 
           const varKey = (cond.variable ?? "").replace(/\{\{|\}\}/g, "");
-          const varValue = data[varKey] ?? "";
+          const varValue = String(data[varKey] ?? "");
           let conditionOutput = "default";
 
           // Multi-branch path: loop in order, first match wins
@@ -746,7 +772,7 @@ export async function runWorkflow(
         case "send_menu": {
           await logStepEntry(executionLogId, step.id, step.type, lastMessage);
 
-          const mc = (step as any).menuConfig;
+          const mc = step.menuConfig;
           if (!mc?.body) {
             session.currentStepId = step.nextStep ?? "END";
             await logStepExit(executionLogId, "completed", "skipped: missing body", session.currentStepId, 0);
@@ -755,52 +781,99 @@ export async function runWorkflow(
 
           let sections = mc.sections ?? [];
 
-          // Dynamic rows — overrides static sections if key is set
           if (mc.dynamicRowsKey) {
-            const rawValue = data[mc.dynamicRowsKey] ?? "";
+            const rawValue = String(data[mc.dynamicRowsKey] ?? "");
             if (rawValue) {
               sections = buildDynamicRows(rawValue, mc.sectionTitle ?? "Options");
             }
           }
 
-          const menuBody = interpolate(mc.body ?? "", data);
+          const menuBody = resolveTemplate(mc.body ?? "", data);
           const menuSections = sections.map((s: any) => ({
-            title: s.title,
-            rows: (s.rows ?? []).map((r: any) => ({
-              id: r.id ?? `row_${Date.now()}`,
-              title: r.title ?? "",
-              description: r.description ?? "",
+            title: resolveTemplate(String(s.title ?? ""), data),
+            rows: (s.rows ?? []).map((r: any, rowIndex: number) => ({
+              id: resolveTemplate(String(r.id ?? r.title ?? `row_${rowIndex}`), data),
+              title: resolveTemplate(String(r.title ?? ""), data),
+              description: resolveTemplate(String(r.description ?? ""), data),
             })),
           }));
+          const buttonText = resolveTemplate(mc.buttonText ?? "Choose an option", data);
 
-          if (/^\d{10,15}$/.test(threadId)) {
+          const sendMenuCpaas = async () => {
+            if (!/^\d{10,15}$/.test(threadId)) return;
             const creds = await getCredentials(adminId);
-            if (creds) {
-              try {
-                await sendListMessage({
-                  credentials: creds,
-                  mobile: threadId,
-                  body: menuBody,
-                  buttonText: mc.buttonText ?? "Choose an option",
-                  sections: menuSections,
-                });
-                sentViaCpaas = true;
-              } catch (menuErr) {
-                console.error("[WorkflowEngine] send_menu failed:",
-                  menuErr instanceof Error ? menuErr.message : menuErr);
-              }
+            if (!creds) return;
+            try {
+              await sendListMessage({
+                credentials: creds,
+                mobile: threadId,
+                body: menuBody,
+                buttonText,
+                sections: menuSections,
+              });
+              sentViaCpaas = true;
+            } catch (menuErr) {
+              console.error(
+                "[WorkflowEngine] send_menu failed:",
+                menuErr instanceof Error ? menuErr.message : menuErr
+              );
+            }
+          };
+
+          if (!session.waitingForInput || session.currentStepId !== step.id) {
+            outboundMsg = menuBody || null;
+            lastPreview = {
+              type: "list",
+              body: menuBody,
+              sections: menuSections,
+            };
+            await sendMenuCpaas();
+            session.waitingForInput = true;
+            session.currentStepId = step.id;
+            continueLoop = false;
+            await logStepExit(executionLogId, "waiting", "waiting for selection", session.currentStepId, 0);
+            break;
+          }
+
+          const rawInput = String(lastMessage ?? "").trim();
+          const itemIds: string[] = [];
+          const labelMap: Record<string, string> = {};
+          for (const sec of menuSections) {
+            for (const row of sec.rows || []) {
+              const id = String(row.id || row.title || "");
+              itemIds.push(id.toLowerCase());
+              const label = String(row.title || row.description || id);
+              labelMap[id.toLowerCase()] = label;
             }
           }
 
-          lastPreview = {
-            type: "list",
-            body: menuBody,
-            sections: menuSections,
-          };
-          outboundMsg = menuBody || null;
+          if (itemIds.length > 0 && !itemIds.includes(rawInput.toLowerCase())) {
+            await sendMenuCpaas();
+            outboundMsg = menuBody || null;
+            lastPreview = {
+              type: "list",
+              body: menuBody,
+              sections: menuSections,
+            };
+            session.waitingForInput = true;
+            session.currentStepId = step.id;
+            continueLoop = false;
+            await logStepExit(executionLogId, "waiting", "invalid selection", session.currentStepId, 0);
+            break;
+          }
+
+          const resolvedLabel = labelMap[rawInput.toLowerCase()] ?? rawInput;
+          const autoReplyKey = `__menu_reply_${step.id}`;
+          session.collectedData.set(autoReplyKey, rawInput);
+          session.collectedData.set(`${autoReplyKey}_title`, resolvedLabel);
+          if (step.saveResponseTo) {
+            session.collectedData.set(step.saveResponseTo, resolvedLabel);
+          }
+          session.markModified("collectedData");
+          session.waitingForInput = false;
           session.currentStepId = step.nextStep ?? "END";
-          continueLoop = false;
-          await logStepExit(executionLogId, "completed", "menu sent", session.currentStepId, 0);
+          continueLoop = true;
+          await logStepExit(executionLogId, "completed", "menu selection", session.currentStepId, 0);
           break;
         }
 
@@ -816,14 +889,14 @@ export async function runWorkflow(
           }
 
           const countKey = `__loop_${step.id}_count`;
-          const currentCount = parseInt(data[countKey] ?? "0", 10);
+          const currentCount = parseInt(String(data[countKey] ?? "0"), 10);
           const maxIter = lc.maxIterations ?? 10;
 
           // Check exit condition first (if defined)
           let exitNow = currentCount >= maxIter;
           if (!exitNow && lc.exitCondition?.variable) {
             const exitVarKey = (lc.exitCondition.variable).replace(/\{\{|\}\}/g, "");
-            const exitVarValue = data[exitVarKey] ?? "";
+            const exitVarValue = String(data[exitVarKey] ?? "");
             if (evaluateBranch(lc.exitCondition.operator, exitVarValue, lc.exitCondition.value)) {
               exitNow = true;
             }
@@ -846,8 +919,8 @@ export async function runWorkflow(
           await logStepEntry(executionLogId, step.id, step.type, lastMessage);
 
           const mediaType = (step as any).mediaType ?? "image";
-          const mediaUrl  = interpolate((step as any).mediaUrl ?? "", data);
-          const caption   = interpolate((step as any).caption  ?? "", data);
+          const mediaUrl  = resolveTemplate((step as any).mediaUrl ?? "", data);
+          const caption   = resolveTemplate((step as any).caption  ?? "", data);
           const filename  = (step as any).filename ?? "";
 
           // Map frontend mediaType → CPaaS messageType
