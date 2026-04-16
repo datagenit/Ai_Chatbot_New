@@ -7,6 +7,8 @@ import UsageLog from "../models/UsageLog.js";
 import ExecutionLog from "../models/ExecutionLog.js";
 import GlobalVariable from "../models/GlobalVariable.js";
 import { sendTemplate, getCredentials, sendTextMessage, sendTextWithButtons, sendListMessage, sendMediaMessage, assignAgent, addLabel } from "../services/cpaas.js";
+import { runAgent } from "../agent/index.js";
+import { AIMessage } from "@langchain/core/messages";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -250,6 +252,346 @@ async function logStepExit(
   }
 }
 
+// ── Stale button / menu reply detector ───────────────────────────────────────
+
+async function detectStaleButtonReply(
+  input: string,
+  session: any,
+  workflow: any
+): Promise<{ staleStep: any; matchedValue: string; matchedLabel: string } | null> {
+  if (!session.waitingForInput) return null;
+
+  const inTrim = String(input ?? "").trim();
+  if (!inTrim) return null;
+  const inLower = inTrim.toLowerCase();
+
+  const steps = workflow.steps ?? [];
+  const skipId = session.currentStepId;
+
+  // Two-pass matching:
+  // 1) Title-only pass — user-visible text (typed or echoed) is unambiguous.
+  // 2) Id-only pass — WhatsApp list replies send row ids; many menus reuse "row_1".
+  //    Scan steps in *reverse* so deeper / later-defined menus win over the root menu.
+
+  for (let i = steps.length - 1; i >= 0; i--) {
+    const step = steps[i];
+    if (step.id === skipId) continue;
+
+    if (step.type === "send_interactive") {
+      const buttons = step.interactiveConfig?.buttons || [];
+      const match = buttons.find(
+        (b: any) =>
+          String(b.title ?? "").toLowerCase().trim() === inLower
+      );
+      if (match) {
+        return {
+          staleStep: step,
+          matchedValue: String(match.id),
+          matchedLabel: String(match.title ?? match.id ?? ""),
+        };
+      }
+    }
+
+    if (step.type === "send_menu") {
+      const sections = step.menuConfig?.sections || [];
+      for (const section of sections) {
+        for (const r of section.rows ?? []) {
+          if (String(r.title ?? "").toLowerCase().trim() === inLower) {
+            return {
+              staleStep: step,
+              matchedValue: String(r.id ?? r.title ?? ""),
+              matchedLabel: String(r.title ?? r.id ?? ""),
+            };
+          }
+        }
+      }
+    }
+  }
+
+  for (let i = steps.length - 1; i >= 0; i--) {
+    const step = steps[i];
+    if (step.id === skipId) continue;
+
+    if (step.type === "send_interactive") {
+      const buttons = step.interactiveConfig?.buttons || [];
+      const match = buttons.find((b: any) => String(b.id ?? "") === inTrim);
+      if (match) {
+        return {
+          staleStep: step,
+          matchedValue: String(match.id),
+          matchedLabel: String(match.title ?? match.id ?? ""),
+        };
+      }
+    }
+
+    if (step.type === "send_menu") {
+      const sections = step.menuConfig?.sections || [];
+      for (const section of sections) {
+        for (const r of section.rows ?? []) {
+          if (String(r.id ?? "") === inTrim) {
+            return {
+              staleStep: step,
+              matchedValue: String(r.id),
+              matchedLabel: String(r.title ?? r.id ?? ""),
+            };
+          }
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+// ── AI Intent Guard helpers ───────────────────────────────────────────────────
+
+function buildWorkflowContext(
+  session: any,
+  workflow: any,
+  currentStepQuestion: string
+): string {
+  const collected: Record<string, string> = {};
+  session.collectedData?.forEach((v: string, k: string) => {
+    if (
+      !k.startsWith("__retries_") &&
+      !k.startsWith("__loop_") &&
+      !k.startsWith("__menu_reply_")
+    ) {
+      collected[k] = v;
+    }
+  });
+
+  const collectedStr =
+    Object.keys(collected).length > 0
+      ? Object.entries(collected)
+          .map(([k, v]) => `${k}: ${v}`)
+          .join(", ")
+      : "none yet";
+
+  return (
+    `[mid-workflow context] Workflow: "${workflow.name}". ` +
+    `Current step is asking: "${currentStepQuestion}". ` +
+    `Data collected so far: ${collectedStr}.`
+  );
+}
+
+async function isOffTopicMessage(
+  input: string,
+  stepQuestion: string,
+  validOptions: string[],
+  adminId: string,
+  threadId: string
+): Promise<boolean> {
+  try {
+    const { ChatGoogleGenerativeAI } = await import("@langchain/google-genai");
+    const llm = new ChatGoogleGenerativeAI({
+      model: "gemini-2.0-flash",
+      temperature: 0,
+      maxOutputTokens: 5,
+      apiKey: process.env.GOOGLE_API_KEY,
+    });
+
+    const optionsLine =
+      validOptions.length > 0
+        ? `Valid options: ${validOptions.join(", ")}`
+        : "Any free-form text is acceptable.";
+
+    const prompt =
+      `Step question: "${stepQuestion}"\n` +
+      `${optionsLine}\n` +
+      `User replied: "${input}"\n\n` +
+      `Is this reply completely unrelated to the step question? ` +
+      `Reply with only YES or NO.`;
+
+    const result = await llm.invoke([{ role: "user", content: prompt }]);
+    const answer = (result.content as string).trim().toUpperCase();
+
+    const usage =
+      (result as any).response_metadata?.usage_metadata ??
+      (result as any).usage_metadata;
+    if (usage) {
+      const inputTokens =
+        usage.input_token_count ?? usage.prompt_token_count ?? 0;
+      const outputTokens =
+        usage.output_token_count ?? usage.candidates_token_count ?? 0;
+      UsageLog.create({
+        adminId,
+        threadId,
+        modelName: "gemini-2.0-flash",
+        inputTokens,
+        outputTokens,
+        totalTokens: inputTokens + outputTokens,
+        source: threadId.startsWith("admin-test") ? "test" : "whatsapp",
+        latencyMs: 0,
+        status: "success",
+      }).catch(() => {});
+    }
+
+    return answer.startsWith("YES");
+  } catch (err) {
+    console.error(
+      "[AIIntentGuard] isOffTopicMessage error — defaulting to false:",
+      err
+    );
+    return false;
+  }
+}
+
+async function handleOffTopicReply(
+  input: string,
+  stepQuestion: string,
+  workflowContext: string,
+  adminId: string,
+  threadId: string,
+  session: any
+): Promise<void> {
+  try {
+    const enrichedInput = `${workflowContext}\n\nUser question: ${input}`;
+
+    const result = await runAgent(adminId, enrichedInput, threadId);
+
+    const messages = result.messages ?? [];
+    let ragAnswer = "";
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      const isAI =
+        msg instanceof AIMessage ||
+        (typeof (msg as any)._getType === "function" &&
+          (msg as any)._getType() === "ai") ||
+        (msg as any).role === "assistant";
+      if (!isAI) continue;
+      const hasToolCalls =
+        "tool_calls" in (msg as any) &&
+        Array.isArray((msg as any).tool_calls) &&
+        (msg as any).tool_calls.length > 0;
+      if (hasToolCalls) continue;
+      if (
+        typeof (msg as any).content === "string" &&
+        (msg as any).content.trim()
+      ) {
+        ragAnswer = (msg as any).content.trim();
+        break;
+      }
+    }
+
+    if (/^\d{10,15}$/.test(threadId)) {
+      const creds = await getCredentials(adminId);
+      if (creds && ragAnswer) {
+        await sendTextMessage({
+          credentials: creds,
+          mobile: session.threadId,
+          message: ragAnswer,
+        });
+      }
+    }
+
+    if (/^\d{10,15}$/.test(threadId)) {
+      const creds = await getCredentials(adminId);
+      if (creds && stepQuestion) {
+        await sendTextMessage({
+          credentials: creds,
+          mobile: session.threadId,
+          message: stepQuestion,
+        });
+      }
+    }
+
+    console.log(
+      `[AIIntentGuard] Off-topic handled for session ${session._id}. ` +
+      `RAG answered, step re-prompted.`
+    );
+  } catch (err) {
+    console.error("[AIIntentGuard] handleOffTopicReply error:", err);
+  }
+}
+
+// ── Session V2 awaiting-state helpers ─────────────────────────────────────────
+
+function setAwaitingState(
+  session: any,
+  payload: {
+    stepId: string;
+    type: "send_menu" | "send_interactive" | "collect_input";
+    promptText?: string;
+    validReplyIds?: string[];
+    validReplyLabels?: string[];
+  }
+) {
+  session.awaitingStepId = payload.stepId;
+  session.awaitingType = payload.type;
+  session.promptText = payload.promptText ?? "";
+  session.validReplyIds = payload.validReplyIds ?? [];
+  session.validReplyLabels = payload.validReplyLabels ?? [];
+}
+
+function clearAwaitingState(session: any) {
+  session.awaitingStepId = null;
+  session.awaitingType = null;
+  session.promptText = "";
+  session.validReplyIds = [];
+  session.validReplyLabels = [];
+}
+
+function matchesAwaitingState(
+  session: any,
+  step: any,
+  expectedType: "send_menu" | "send_interactive" | "collect_input"
+): boolean {
+  return (
+    session.waitingForInput === true &&
+    session.awaitingStepId === step.id &&
+    session.awaitingType === expectedType
+  );
+}
+
+function canUseLegacyAwaitingFallback(session: any, step: any): boolean {
+  return (
+    session.waitingForInput === true &&
+    (!session.awaitingStepId || !session.awaitingType) &&
+    session.currentStepId === step.id
+  );
+}
+
+function repairAwaitingStateFromStep(
+  session: any,
+  step: any,
+  payload: {
+    type: "send_menu" | "send_interactive" | "collect_input";
+    promptText?: string;
+    validReplyIds?: string[];
+    validReplyLabels?: string[];
+  }
+) {
+  setAwaitingState(session, {
+    stepId: step.id,
+    type: payload.type,
+    promptText: payload.promptText ?? "",
+    validReplyIds: payload.validReplyIds ?? [],
+    validReplyLabels: payload.validReplyLabels ?? [],
+  });
+}
+
+function applyStaleSelectionToSession(
+  session: any,
+  staleMatch: {
+    staleStep: any;
+    matchedValue: string;
+    matchedLabel: string;
+  }
+) {
+  const staleStep = staleMatch.staleStep;
+  const replyKey = `__menu_reply_${staleStep.id}`;
+  const titleKey = `__menu_reply_${staleStep.id}_title`;
+
+  session.collectedData.set(replyKey, staleMatch.matchedValue);
+  session.collectedData.set(titleKey, staleMatch.matchedLabel);
+  session.markModified("collectedData");
+
+  clearAwaitingState(session);
+  session.waitingForInput = false;
+  session.currentStepId = staleStep.nextStep ?? "END";
+}
+
 // ── Main runner ───────────────────────────────────────────────────────────────
 
 export async function runWorkflow(
@@ -426,10 +768,118 @@ export async function runWorkflow(
             await sendInteractiveCpaas();
             session.waitingForInput = true;
             session.currentStepId = step.id;
+            setAwaitingState(session, {
+              stepId: step.id,
+              type: "send_interactive",
+              promptText: messageText,
+              validReplyIds: buttons.map((b: any) => String(b.id)),
+              validReplyLabels: buttons.map((b: any) => String(b.title)),
+            });
             continueLoop = false;
             await logStepExit(executionLogId, "waiting", "waiting for selection", session.currentStepId, 0);
             break;
           }
+
+          // ── V2 / legacy phase-2 gate ──────────────────────────────────────
+          {
+            let isV2Match = matchesAwaitingState(session, step, "send_interactive");
+            const isLegacyMatch = canUseLegacyAwaitingFallback(session, step);
+
+            if (!isV2Match && isLegacyMatch) {
+              // Self-heal: old/inconsistent session — repair V2 state without resending
+              repairAwaitingStateFromStep(session, step, {
+                type: "send_interactive",
+                promptText: messageText,
+                validReplyIds: buttons.map((b: any) => String(b.id)),
+                validReplyLabels: buttons.map((b: any) => String(b.title)),
+              });
+              await session.save();
+              isV2Match = true;
+            }
+
+            if (!isV2Match && !isLegacyMatch) {
+              // V2 awaiting state is for a different step — re-run Phase 1
+              outboundMsg = messageText;
+              lastPreview = {
+                type: "interactive",
+                body: messageText,
+                buttons: buttons.map((b: { id: string; title: string }) => ({
+                  id: b.id,
+                  title: b.title,
+                })),
+              };
+              await sendInteractiveCpaas();
+              session.waitingForInput = true;
+              session.currentStepId = step.id;
+              setAwaitingState(session, {
+                stepId: step.id,
+                type: "send_interactive",
+                promptText: messageText,
+                validReplyIds: buttons.map((b: any) => String(b.id)),
+                validReplyLabels: buttons.map((b: any) => String(b.title)),
+              });
+              continueLoop = false;
+              await logStepExit(executionLogId, "waiting", "waiting for selection", session.currentStepId, 0);
+              break;
+            }
+          }
+
+          // --- STALE BUTTON DETECTION ---
+          {
+            // Only run stale detection when input does NOT match the current step's own buttons.
+            // This prevents false positives when multiple steps share the same button/row id
+            // (e.g. every menu has a "row_1" entry).
+            const rawInputCheck = String(lastMessage ?? "").trim().toLowerCase();
+            const isCurrentStepInput =
+              buttons.some((b: any) => String(b.id).toLowerCase() === rawInputCheck) ||
+              buttons.some(
+                (b: any) => (b.title ?? "").toLowerCase().trim() === rawInputCheck
+              );
+
+            if (!isCurrentStepInput) {
+              const staleMatch = await detectStaleButtonReply(lastMessage, session, workflow);
+              if (staleMatch) {
+                console.log(
+                  `[WorkflowEngine] Stale reply detected. Consuming selection immediately ` +
+                  `for session ${session._id}, stale step "${staleMatch.staleStep.id}" ` +
+                  `→ nextStep "${staleMatch.staleStep.nextStep ?? "END"}"`
+                );
+
+                // Remove internal keys that belong to steps after the stale step
+                const retryKeysToRemove: string[] = [];
+                session.collectedData.forEach((_: any, key: string) => {
+                  if (
+                    key.startsWith("__retries_") ||
+                    key.startsWith("__menu_reply_") ||
+                    key.startsWith("__loop_")
+                  ) {
+                    const keyStepId = key
+                      .replace("__retries_", "")
+                      .replace("__menu_reply_", "")
+                      .replace(/_title$/, "")
+                      .replace("__loop_", "")
+                      .replace(/_count$/, "");
+                    if (keyStepId !== staleMatch.staleStep.id) {
+                      retryKeysToRemove.push(key);
+                    }
+                  }
+                });
+                retryKeysToRemove.forEach((k) => session.collectedData.delete(k));
+
+                // Consume the stale selection immediately — no Phase 1 resend
+                applyStaleSelectionToSession(session, staleMatch);
+                session.lastActivityAt = new Date();
+                session.expiresAt = new Date(
+                  Date.now() + (workflow.timeoutMinutes || 30) * 60 * 1000
+                );
+                await session.save();
+
+                continueLoop = true;
+                continue;
+              }
+            }
+          }
+          // --- END STALE BUTTON DETECTION ---
 
           const rawInput = String(lastMessage ?? "").trim();
           const buttonIds = buttons.map((b: { id: string }) => String(b.id).toLowerCase());
@@ -439,6 +889,46 @@ export async function runWorkflow(
             const label = String(b.title || b.id);
             labelMap[id.toLowerCase()] = label;
           });
+
+          // --- AI INTENT GUARD: send_interactive ---
+          {
+            const siQuestion = resolveTemplate(ic?.message ?? "", data);
+            const buttonTitles = buttons.map(
+              (b: { id: string; title: string }) => b.title
+            );
+
+            const siOffTopic = await isOffTopicMessage(
+              rawInput,
+              siQuestion,
+              buttonTitles,
+              adminId,
+              threadId
+            );
+
+            if (siOffTopic) {
+              const wfContext = buildWorkflowContext(session, workflow, siQuestion);
+              await handleOffTopicReply(
+                rawInput,
+                siQuestion,
+                wfContext,
+                adminId,
+                threadId,
+                session
+              );
+              session.lastActivityAt = new Date();
+              await session.save();
+              continueLoop = false;
+              await logStepExit(
+                executionLogId,
+                "waiting",
+                "off-topic handled by RAG",
+                session.currentStepId,
+                0
+              );
+              break;
+            }
+          }
+          // --- END AI INTENT GUARD ---
 
           if (buttonIds.length > 0 && !buttonIds.includes(rawInput.toLowerCase())) {
             await sendInteractiveCpaas();
@@ -463,6 +953,7 @@ export async function runWorkflow(
             session.collectedData.set(step.saveResponseTo, resolvedLabel);
           }
           session.markModified("collectedData");
+          clearAwaitingState(session);
           session.waitingForInput = false;
           session.currentStepId = step.nextStep ?? "END";
           continueLoop = true;
@@ -495,19 +986,37 @@ export async function runWorkflow(
             }
             session.waitingForInput = true;
             session.currentStepId = step.id;
+            setAwaitingState(session, {
+              stepId: step.id,
+              type: "collect_input",
+              promptText,
+              validReplyIds: [],
+              validReplyLabels: Array.isArray(step.validOptions) ? (step.validOptions as string[]) : [],
+            });
             continueLoop = false;
             await logStepExit(executionLogId, "waiting", "waiting for input", session.currentStepId, 0);
             break;
           }
 
-          const rawInput = String(lastMessage ?? "").trim();
-          const validOptions = Array.isArray(step.validOptions)
-            ? (step.validOptions as string[])
-            : [];
+          // ── V2 / legacy phase-2 gate ──────────────────────────────────────
+          {
+            let isV2Match = matchesAwaitingState(session, step, "collect_input");
+            const isLegacyMatch = canUseLegacyAwaitingFallback(session, step);
 
-          if (validOptions.length > 0) {
-            const lowered = validOptions.map((v) => v.toLowerCase());
-            if (!lowered.includes(rawInput.toLowerCase())) {
+            if (!isV2Match && isLegacyMatch) {
+              // Self-heal: old/inconsistent session — repair V2 state without resending
+              repairAwaitingStateFromStep(session, step, {
+                type: "collect_input",
+                promptText,
+                validReplyIds: [],
+                validReplyLabels: Array.isArray(step.validOptions) ? (step.validOptions as string[]) : [],
+              });
+              await session.save();
+              isV2Match = true;
+            }
+
+            if (!isV2Match && !isLegacyMatch) {
+              // V2 awaiting state is for a different step — re-run Phase 1
               if (promptText) {
                 outboundMsg = promptText;
                 lastPreview = { type: "text", body: promptText };
@@ -525,12 +1034,134 @@ export async function runWorkflow(
               }
               session.waitingForInput = true;
               session.currentStepId = step.id;
+              setAwaitingState(session, {
+                stepId: step.id,
+                type: "collect_input",
+                promptText,
+                validReplyIds: [],
+                validReplyLabels: Array.isArray(step.validOptions) ? (step.validOptions as string[]) : [],
+              });
               continueLoop = false;
-              await logStepExit(executionLogId, "waiting", "invalid selection", session.currentStepId, 0);
+              await logStepExit(executionLogId, "waiting", "waiting for input", session.currentStepId, 0);
               break;
             }
           }
 
+          const rawInput = String(lastMessage ?? "").trim();
+          const validOptions = Array.isArray(step.validOptions)
+            ? (step.validOptions as string[])
+            : [];
+
+          if (validOptions.length > 0) {
+            const lowered = validOptions.map((v: string) => v.toLowerCase());
+            if (!lowered.includes(rawInput.toLowerCase())) {
+
+              const stepQuestion = resolveTemplate(
+                step.prompt ?? step.inputPrompt ?? "",
+                data
+              );
+
+              // --- AI INTENT GUARD: collect_input ---
+              const offTopic = await isOffTopicMessage(
+                rawInput,
+                stepQuestion,
+                validOptions,
+                adminId,
+                threadId
+              );
+
+              if (offTopic) {
+                const wfContext = buildWorkflowContext(session, workflow, stepQuestion);
+                await handleOffTopicReply(
+                  rawInput,
+                  stepQuestion,
+                  wfContext,
+                  adminId,
+                  threadId,
+                  session
+                );
+                session.lastActivityAt = new Date();
+                await session.save();
+                continueLoop = false;
+                await logStepExit(executionLogId, "waiting", "off-topic handled by RAG", session.currentStepId, 0);
+                break;
+              }
+              // --- END AI INTENT GUARD ---
+
+              // ON-TOPIC but invalid — retry logic
+              const retryKey = `__retries_${step.id}`;
+              const retries =
+                parseInt(session.collectedData.get(retryKey) ?? "0") + 1;
+              session.collectedData.set(retryKey, String(retries));
+              session.markModified("collectedData");
+
+              const maxRetries = (step as any).maxRetries ?? 3;
+
+              if (retries >= maxRetries) {
+                if ((step as any).onMaxRetries) {
+                  session.currentStepId = (step as any).onMaxRetries;
+                  session.waitingForInput = false;
+                  await session.save();
+                  continueLoop = true;
+                  await logStepExit(
+                    executionLogId,
+                    "completed",
+                    "max retries → onMaxRetries",
+                    session.currentStepId,
+                    retries
+                  );
+                  break;
+                } else {
+                  session.done = true;
+                  session.waitingForInput = false;
+                  session.lastActivityAt = new Date();
+                  session.markModified("collectedData");
+                  await session.save();
+                  continueLoop = false;
+                  await logStepExit(
+                    executionLogId,
+                    "error",
+                    "max retries exceeded",
+                    session.currentStepId,
+                    retries
+                  );
+                  break;
+                }
+              }
+
+              // Under retry limit — send retryPrompt and wait again
+              const retryMsg = resolveTemplate(
+                (step as any).retryPrompt ?? stepQuestion,
+                data
+              );
+              outboundMsg = retryMsg;
+              lastPreview = { type: "text", body: retryMsg };
+              if (/^\d{10,15}$/.test(threadId)) {
+                const creds = await getCredentials(adminId);
+                if (creds) {
+                  await sendTextMessage({
+                    credentials: creds,
+                    mobile: session.threadId,
+                    message: retryMsg,
+                  });
+                }
+              }
+              session.waitingForInput = true;
+              session.currentStepId = step.id;
+              continueLoop = false;
+              await session.save();
+              await logStepExit(
+                executionLogId,
+                "waiting",
+                `invalid — retry ${retries}/${maxRetries}`,
+                session.currentStepId,
+                retries
+              );
+              break;
+            }
+          }
+
+          clearAwaitingState(session);
           session.collectedData.set(varKey, rawInput);
           session.markModified("collectedData");
           session.waitingForInput = false;
@@ -717,6 +1348,7 @@ export async function runWorkflow(
           const varKey = (cond.variable ?? "").replace(/\{\{|\}\}/g, "");
           const varValue = String(data[varKey] ?? "");
           let conditionOutput = "default";
+          let nextStepId: string | undefined;
 
           // Multi-branch path: loop in order, first match wins
           if (cond.branches && cond.branches.length > 0) {
@@ -735,7 +1367,7 @@ export async function runWorkflow(
                   (b: any) => (b.label ?? "").toLowerCase() === matchedLabel.toLowerCase()
                 );
                 if (branch) {
-                  session.currentStepId = branch.nextStep ?? cond.defaultNextStep ?? "END";
+                  nextStepId = branch.nextStep ?? cond.defaultNextStep;
                   conditionOutput = `branch: ${matchedLabel}`;
                   matched = true;
                 }
@@ -744,7 +1376,7 @@ export async function runWorkflow(
               // Exact match path (existing logic — do not change)
               for (const branch of cond.branches) {
                 if (evaluateBranch(branch.operator, varValue, branch.value)) {
-                  session.currentStepId = branch.nextStep ?? cond.defaultNextStep ?? "END";
+                  nextStepId = branch.nextStep ?? cond.defaultNextStep;
                   conditionOutput = `branch: ${branch.label ?? "matched"}`;
                   matched = true;
                   break;
@@ -753,15 +1385,51 @@ export async function runWorkflow(
             }
 
             if (!matched) {
-              session.currentStepId = cond.defaultNextStep ?? "END";
+              nextStepId = cond.defaultNextStep;
               conditionOutput = "default";
             }
           } else {
             // Legacy single-branch path (onTrue / onFalse)
             const result = evaluateBranch(cond.operator, varValue, cond.value);
-            session.currentStepId = result ? (cond.onTrue ?? "END") : (cond.onFalse ?? "END");
+            nextStepId = result ? cond.onTrue : cond.onFalse;
             conditionOutput = result ? "branch: true" : "branch: false";
           }
+
+          // --- CONDITION FALLTHROUGH GUARD ---
+          if (!nextStepId) {
+            console.warn(
+              `[WorkflowEngine] Condition step "${step.id}" in workflow "${workflow._id}" ` +
+              `has no matching branch and no default path. ` +
+              `Session ${session._id} terminated gracefully.`
+            );
+
+            const fallbackMsg =
+              workflow.expiryMessage ||
+              "Sorry, I couldn't process that. Please type a keyword to start again.";
+
+            if (/^\d{10,15}$/.test(threadId)) {
+              const creds = await getCredentials(adminId);
+              if (creds) {
+                await sendTextMessage({
+                  credentials: creds,
+                  mobile: session.threadId,
+                  message: fallbackMsg,
+                });
+              }
+            }
+
+            session.done = true;
+            session.waitingForInput = false;
+            session.lastActivityAt = new Date();
+            session.markModified("collectedData");
+            await session.save();
+
+            continueLoop = false;
+            break;
+          }
+          // --- END CONDITION FALLTHROUGH GUARD ---
+
+          session.currentStepId = nextStepId;
 
           // continue loop — condition step has no outbound message
           await logStepExit(executionLogId, "completed", conditionOutput, session.currentStepId, 0);
@@ -830,10 +1498,137 @@ export async function runWorkflow(
             await sendMenuCpaas();
             session.waitingForInput = true;
             session.currentStepId = step.id;
+            {
+              const validMenuIds = menuSections.flatMap((s: any) =>
+                (s.rows ?? []).map((r: any) => String(r.id || r.title || ""))
+              );
+              const validMenuLabels = menuSections.flatMap((s: any) =>
+                (s.rows ?? []).map((r: any) => String(r.title || r.description || r.id || ""))
+              );
+              setAwaitingState(session, {
+                stepId: step.id,
+                type: "send_menu",
+                promptText: menuBody,
+                validReplyIds: validMenuIds,
+                validReplyLabels: validMenuLabels,
+              });
+            }
             continueLoop = false;
             await logStepExit(executionLogId, "waiting", "waiting for selection", session.currentStepId, 0);
             break;
           }
+
+          // ── V2 / legacy phase-2 gate ──────────────────────────────────────
+          {
+            let isV2Match = matchesAwaitingState(session, step, "send_menu");
+            const isLegacyMatch = canUseLegacyAwaitingFallback(session, step);
+
+            if (!isV2Match && isLegacyMatch) {
+              // Self-heal: old/inconsistent session — repair V2 state without resending
+              const validMenuIds = menuSections.flatMap((s: any) =>
+                (s.rows ?? []).map((r: any) => String(r.id || r.title || ""))
+              );
+              const validMenuLabels = menuSections.flatMap((s: any) =>
+                (s.rows ?? []).map((r: any) => String(r.title || r.description || r.id || ""))
+              );
+              repairAwaitingStateFromStep(session, step, {
+                type: "send_menu",
+                promptText: menuBody,
+                validReplyIds: validMenuIds,
+                validReplyLabels: validMenuLabels,
+              });
+              await session.save();
+              isV2Match = true;
+            }
+
+            if (!isV2Match && !isLegacyMatch) {
+              // V2 awaiting state is for a different step — re-run Phase 1
+              outboundMsg = menuBody || null;
+              lastPreview = {
+                type: "list",
+                body: menuBody,
+                sections: menuSections,
+              };
+              await sendMenuCpaas();
+              session.waitingForInput = true;
+              session.currentStepId = step.id;
+              const validMenuIds = menuSections.flatMap((s: any) =>
+                (s.rows ?? []).map((r: any) => String(r.id || r.title || ""))
+              );
+              const validMenuLabels = menuSections.flatMap((s: any) =>
+                (s.rows ?? []).map((r: any) => String(r.title || r.description || r.id || ""))
+              );
+              setAwaitingState(session, {
+                stepId: step.id,
+                type: "send_menu",
+                promptText: menuBody,
+                validReplyIds: validMenuIds,
+                validReplyLabels: validMenuLabels,
+              });
+              continueLoop = false;
+              await logStepExit(executionLogId, "waiting", "waiting for selection", session.currentStepId, 0);
+              break;
+            }
+          }
+
+          // --- STALE BUTTON DETECTION ---
+          {
+            // Only run stale detection when input does NOT match the current step's own rows.
+            // This prevents false positives when multiple menus share the same row id
+            // (e.g. every menu uses "row_1" for its first option).
+            const rawInputCheck = String(lastMessage ?? "").trim().toLowerCase();
+            const isCurrentStepInput = menuSections.some((s: any) =>
+              (s.rows ?? []).some(
+                (r: any) =>
+                  String(r.id ?? "").toLowerCase() === rawInputCheck ||
+                  String(r.title ?? "").toLowerCase().trim() === rawInputCheck
+              )
+            );
+
+            if (!isCurrentStepInput) {
+              const staleMatch = await detectStaleButtonReply(lastMessage, session, workflow);
+              if (staleMatch) {
+                console.log(
+                  `[WorkflowEngine] Stale reply detected. Consuming selection immediately ` +
+                  `for session ${session._id}, stale step "${staleMatch.staleStep.id}" ` +
+                  `→ nextStep "${staleMatch.staleStep.nextStep ?? "END"}"`
+                );
+
+                // Remove internal keys that belong to steps after the stale step
+                const retryKeysToRemove: string[] = [];
+                session.collectedData.forEach((_: any, key: string) => {
+                  if (
+                    key.startsWith("__retries_") ||
+                    key.startsWith("__menu_reply_") ||
+                    key.startsWith("__loop_")
+                  ) {
+                    const keyStepId = key
+                      .replace("__retries_", "")
+                      .replace("__menu_reply_", "")
+                      .replace(/_title$/, "")
+                      .replace("__loop_", "")
+                      .replace(/_count$/, "");
+                    if (keyStepId !== staleMatch.staleStep.id) {
+                      retryKeysToRemove.push(key);
+                    }
+                  }
+                });
+                retryKeysToRemove.forEach((k) => session.collectedData.delete(k));
+
+                // Consume the stale selection immediately — no Phase 1 resend
+                applyStaleSelectionToSession(session, staleMatch);
+                session.lastActivityAt = new Date();
+                session.expiresAt = new Date(
+                  Date.now() + (workflow.timeoutMinutes || 30) * 60 * 1000
+                );
+                await session.save();
+
+                continueLoop = true;
+                continue;
+              }
+            }
+          }
+          // --- END STALE BUTTON DETECTION ---
 
           const rawInput = String(lastMessage ?? "").trim();
           const itemIds: string[] = [];
@@ -846,6 +1641,46 @@ export async function runWorkflow(
               labelMap[id.toLowerCase()] = label;
             }
           }
+
+          // --- AI INTENT GUARD: send_menu ---
+          {
+            const menuQuestion = resolveTemplate(mc?.body ?? "", data);
+            const menuTitles = menuSections
+              .flatMap((s: any) => s.rows?.map((r: any) => r.title ?? "") ?? [])
+              .filter(Boolean);
+
+            const menuOffTopic = await isOffTopicMessage(
+              rawInput,
+              menuQuestion,
+              menuTitles,
+              adminId,
+              threadId
+            );
+
+            if (menuOffTopic) {
+              const wfContext = buildWorkflowContext(session, workflow, menuQuestion);
+              await handleOffTopicReply(
+                rawInput,
+                menuQuestion,
+                wfContext,
+                adminId,
+                threadId,
+                session
+              );
+              session.lastActivityAt = new Date();
+              await session.save();
+              continueLoop = false;
+              await logStepExit(
+                executionLogId,
+                "waiting",
+                "off-topic handled by RAG",
+                session.currentStepId,
+                0
+              );
+              break;
+            }
+          }
+          // --- END AI INTENT GUARD ---
 
           if (itemIds.length > 0 && !itemIds.includes(rawInput.toLowerCase())) {
             await sendMenuCpaas();
@@ -870,6 +1705,7 @@ export async function runWorkflow(
             session.collectedData.set(step.saveResponseTo, resolvedLabel);
           }
           session.markModified("collectedData");
+          clearAwaitingState(session);
           session.waitingForInput = false;
           session.currentStepId = step.nextStep ?? "END";
           continueLoop = true;

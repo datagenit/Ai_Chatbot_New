@@ -90,6 +90,11 @@ router.post("/chat", chatLimiter, authMiddleware, async (req: AuthRequest, res) 
             collectedData: new Map(),
             waitingForInput: false,
             done: false,
+            awaitingStepId: null,
+            awaitingType: null,
+            validReplyIds: [],
+            validReplyLabels: [],
+            promptText: "",
           });
           const { text, preview } = await runWorkflow(threadId, adminId, input);
           res.json({

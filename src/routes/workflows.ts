@@ -59,6 +59,11 @@ router.post("/webhook/:webhookPath", async (req, res) => {
         collectedData: new Map(),
         waitingForInput: false,
         done: false,
+        awaitingStepId: null,
+        awaitingType: null,
+        validReplyIds: [],
+        validReplyLabels: [],
+        promptText: "",
       });
 
       // Inject response mappings from webhook payload into session
@@ -337,6 +342,16 @@ router.post("/", async (req: AuthRequest, res: Response) => {
               `Step "${step.id}": condition requires either a variable, branches, or onTrue/onFalse`
             );
           }
+          if (hasBranches && !cond?.defaultNextStep && !(cond?.onTrue && cond?.onFalse)) {
+            res.status(400).json({
+              success: false,
+              error:
+                `Condition step "${step.id}" has branches but no default fallback path. ` +
+                `Add a Default path to handle unmatched replies.`,
+              invalidStepId: step.id,
+            });
+            return;
+          }
           break;
         }
       }
@@ -476,6 +491,25 @@ router.patch("/:id", async (req: AuthRequest, res: Response) => {
     if (trigger !== undefined)     setPayload.trigger     = trigger;
     if (steps !== undefined)       setPayload.steps       = steps;
     if (entryStepId !== undefined) setPayload.entryStepId = entryStepId;
+
+    if (steps !== undefined) {
+      for (const step of steps) {
+        if (step.type === "condition") {
+          const cond = step.condition as any;
+          const hasBranches = Array.isArray(cond?.branches) && cond.branches.length > 0;
+          if (hasBranches && !cond?.defaultNextStep && !(cond?.onTrue && cond?.onFalse)) {
+            res.status(400).json({
+              success: false,
+              error:
+                `Condition step "${step.id}" has branches but no default fallback path. ` +
+                `Add a Default path to handle unmatched replies.`,
+              invalidStepId: step.id,
+            });
+            return;
+          }
+        }
+      }
+    }
 
     const workflow = await Workflow.findOneAndUpdate(
       { _id: req.params.id, adminId: req.adminId },

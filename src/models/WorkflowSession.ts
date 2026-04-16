@@ -17,6 +17,12 @@ export interface IWorkflowSession extends Document {
   updatedAt: Date;
   lastActivityAt: Date;
   expiresAt: Date | null;
+  // ── V2 awaiting-state fields (optional, backward-compatible) ──────────────
+  awaitingStepId?: string | null;
+  awaitingType?: "send_menu" | "send_interactive" | "collect_input" | null;
+  validReplyIds?: string[];
+  validReplyLabels?: string[];
+  promptText?: string;
 }
 
 // ── Schema ────────────────────────────────────────────────────────────────────
@@ -34,6 +40,16 @@ const WorkflowSessionSchema = new Schema<IWorkflowSession>({
   updatedAt: { type: Date, default: Date.now },
   lastActivityAt: { type: Date, default: Date.now },
   expiresAt: { type: Date, default: null },
+  // ── V2 awaiting-state fields ───────────────────────────────────────────────
+  awaitingStepId: { type: String, default: null },
+  awaitingType: {
+    type: String,
+    enum: ["send_menu", "send_interactive", "collect_input", null],
+    default: null,
+  },
+  validReplyIds: { type: [String], default: [] },
+  validReplyLabels: { type: [String], default: [] },
+  promptText: { type: String, default: "" },
 });
 
 // TTL — auto-delete completed sessions after 30 days
