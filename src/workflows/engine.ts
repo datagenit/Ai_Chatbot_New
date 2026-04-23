@@ -1878,6 +1878,101 @@ export async function runWorkflow(
           break;
         }
 
+        // ── ai_router ─────────────────────────────────────────────────────────
+        case "ai_router": {
+          await logStepEntry(executionLogId, step.id, step.type, lastMessage);
+
+          const arc = (step as any).aiRouterConfig;
+          if (!arc || !Array.isArray(arc.routes) || arc.routes.length === 0) {
+            session.currentStepId = arc?.defaultNextStep ?? "END";
+            continueLoop = true;
+            await logStepExit(executionLogId, "completed", "skipped: missing config", session.currentStepId, 0);
+            break;
+          }
+
+          const startTime = Date.now();
+          let routerNext: string = arc.defaultNextStep ?? "END";
+          let matchedLabel = "default";
+
+          try {
+            const { ChatGoogleGenerativeAI } = await import("@langchain/google-genai");
+            const llm = new ChatGoogleGenerativeAI({
+              model: "gemini-2.0-flash",
+              temperature: 0,
+              apiKey: process.env.GOOGLE_API_KEY,
+            });
+
+            const routeList = (arc.routes as { label: string; nextStep: string }[])
+              .map((r, i) => `${i + 1}. ${r.label}`)
+              .join("\n");
+
+            const promptContent =
+              `Classify this message into one of these intents:\n${routeList}\n\n` +
+              `Message: ${lastMessage}\n\n` +
+              `Reply with only the number (1 to ${arc.routes.length}) or 0 if none match.`;
+
+            const msgs: Array<{ role: string; content: string }> = [];
+            if (arc.systemPrompt) {
+              msgs.push({ role: "system", content: resolveTemplate(arc.systemPrompt, data) });
+            }
+            msgs.push({ role: "user", content: promptContent });
+
+            const result = await llm.invoke(msgs);
+            const latencyMs = Date.now() - startTime;
+
+            const usage =
+              (result as any).response_metadata?.usage ??
+              (result as any).usage_metadata ?? {};
+            const inputTokens  = usage.input_tokens  ?? usage.prompt_tokens  ?? 0;
+            const outputTokens = usage.output_tokens ?? usage.completion_tokens ?? 0;
+            const totalTokens  = usage.total_tokens  ?? (inputTokens + outputTokens);
+
+            UsageLog.create({
+              adminId,
+              threadId,
+              modelName: "gemini-2.0-flash",
+              inputTokens,
+              outputTokens,
+              totalTokens,
+              source: threadId.startsWith("admin-test") ? "test" : "whatsapp",
+              latencyMs,
+              status: "success",
+            }).catch((err) => console.error("[UsageLog] Failed to save usage:", err));
+
+            const raw = String(result.content).trim();
+            const parsed = parseInt(raw, 10);
+
+            if (!isNaN(parsed) && parsed >= 1 && parsed <= arc.routes.length) {
+              const route = (arc.routes as { label: string; nextStep: string }[])[parsed - 1];
+              routerNext = route.nextStep;
+              matchedLabel = route.label;
+            }
+          } catch (routerErr) {
+            const latencyMs = Date.now() - startTime;
+            console.error(
+              "[ai_router] LLM failed, falling back to default:",
+              routerErr instanceof Error ? routerErr.message : routerErr
+            );
+            UsageLog.create({
+              adminId,
+              threadId,
+              modelName: "gemini-2.0-flash",
+              inputTokens: 0,
+              outputTokens: 0,
+              totalTokens: 0,
+              source: threadId.startsWith("admin-test") ? "test" : "whatsapp",
+              latencyMs,
+              status: "error",
+            }).catch(() => {});
+          }
+
+          console.log(`[ai_router] step=${step.id} | matched=${matchedLabel} | next=${routerNext}`);
+          session.currentStepId = routerNext;
+          continueLoop = true;
+          await logStepExit(executionLogId, "completed", `matched: ${matchedLabel}`, session.currentStepId, 0);
+          break;
+        }
+
         default:
           session.currentStepId = step.nextStep ?? "END";
           break;

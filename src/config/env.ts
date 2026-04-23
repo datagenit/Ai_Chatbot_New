@@ -23,8 +23,9 @@ export const env = {
   TOOL_URL2: getEnv("TOOL_URL2"),
   TOOL_URL3: getEnv("TOOL_URL3"),
   AUTH_SERVER_URL: getEnv("AUTH_SERVER_URL"),
-  PINECONE_API_KEY: getEnv("PINECONE_API_KEY"),       // ← added
-  PINECONE_INDEX_NAME: getEnv("PINECONE_INDEX_NAME")
+  PINECONE_API_KEY: getEnv("PINECONE_API_KEY"),       
+  PINECONE_INDEX_NAME: getEnv("PINECONE_INDEX_NAME"),
+  INTERNAL_SERVER_IP: process.env["INTERNAL_SERVER_IP"]
 } as const;
 
 export type Env = typeof env;

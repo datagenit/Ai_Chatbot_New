@@ -31,6 +31,7 @@ const StepSchema = new Schema(
         "send_menu",
         "loop",
         "send_media",
+        "ai_router",
       ],
       required: true,
     },
@@ -154,6 +155,18 @@ const StepSchema = new Schema(
         value: { type: String },
       },
     },
+
+    // type: "ai_router"
+    aiRouterConfig: {
+      systemPrompt: { type: String },
+      routes: [
+        {
+          label: { type: String },
+          nextStep: { type: String },
+        },
+      ],
+      defaultNextStep: { type: String },
+    },
   },
   { _id: false }
 );
@@ -179,7 +192,8 @@ export interface IWorkflowStep {
     | "send_interactive"
     | "send_menu"
     | "loop"
-    | "send_media";
+    | "send_media"
+    | "ai_router";
   nextStep?: string;
   message?: string;
   mediaType?: string;
@@ -246,6 +260,11 @@ export interface IWorkflowStep {
       operator?: "equals" | "contains" | "exists" | "not_equals" | "not_contains";
       value?: string;
     };
+  };
+  aiRouterConfig?: {
+    systemPrompt?: string;
+    routes: { label: string; nextStep: string }[];
+    defaultNextStep: string;
   };
 }
 

@@ -11,6 +11,21 @@ export function authMiddleware(
   res: Response,
   next: NextFunction
 ): void {
+  const forwarded = req.headers["x-forwarded-for"];
+  const clientIp = (Array.isArray(forwarded) ? forwarded[0] : forwarded?.split(",")[0]?.trim()) ?? req.socket.remoteAddress;
+
+  if (env.INTERNAL_SERVER_IP && clientIp === env.INTERNAL_SERVER_IP) {
+    const adminId = req.body?.user?.parent_id?.toString();
+    if (!adminId) {
+      res.status(401).json({ error: "Internal request missing user.parent_id" });
+      return;
+    }
+    console.log(`[Auth] IP bypass | adminId: ${adminId}`);
+    req.adminId = adminId;
+    next();
+    return;
+  }
+
   const authHeader = req.headers.authorization;
 
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
