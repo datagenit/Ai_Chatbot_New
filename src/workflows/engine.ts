@@ -8,7 +8,9 @@ import ExecutionLog from "../models/ExecutionLog.js";
 import GlobalVariable from "../models/GlobalVariable.js";
 import { sendTemplate, getCredentials, sendTextMessage, sendTextWithButtons, sendListMessage, sendMediaMessage, assignAgent, addLabel } from "../services/cpaas.js";
 import { runAgent } from "../agent/index.js";
-import { AIMessage } from "@langchain/core/messages";
+import { AIMessage, SystemMessage, HumanMessage } from "@langchain/core/messages";
+import AdminConfig from "../models/AdminConfig.js";
+import { retrieve } from "../ingestion/retriever.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -955,7 +957,14 @@ export async function runWorkflow(
           session.markModified("collectedData");
           clearAwaitingState(session);
           session.waitingForInput = false;
-          session.currentStepId = step.nextStep ?? "END";
+          // Per-button routing: if the matched button has its own nextStep, use it;
+          // otherwise fall back to the step-level nextStep.
+          const matchedBtn = (ic?.buttons ?? []).find((b: any) => {
+            const rawId = String(b?.id ?? b?.reply?.id ?? b?.title ?? b?.label ?? "");
+            return resolveTemplate(rawId, data).toLowerCase() === rawInput.toLowerCase();
+          });
+          const btnNextStep = String((matchedBtn as any)?.nextStep ?? "").trim();
+          session.currentStepId = btnNextStep || step.nextStep || "END";
           continueLoop = true;
           await logStepExit(executionLogId, "completed", "interactive selection", session.currentStepId, 0);
           break;
@@ -969,19 +978,28 @@ export async function runWorkflow(
           const varKey = step.variable ?? step.inputKey ?? "input";
 
           if (!session.waitingForInput || session.currentStepId !== step.id) {
-            if (promptText) {
-              outboundMsg = promptText;
-              lastPreview = { type: "text", body: promptText };
-              if (/^\d{10,15}$/.test(threadId)) {
-                const creds = await getCredentials(adminId);
-                if (creds) {
-                  await sendTextMessage({
-                    credentials: creds,
-                    mobile: session.threadId,
-                    message: promptText,
-                  });
-                  sentViaCpaas = true;
-                }
+            if (!promptText) {
+              // No prompt — collect the current incoming message immediately
+              clearAwaitingState(session);
+              session.collectedData.set(varKey, String(lastMessage ?? "").trim());
+              session.markModified("collectedData");
+              session.waitingForInput = false;
+              session.currentStepId = step.nextStep ?? "END";
+              continueLoop = true;
+              await logStepExit(executionLogId, "completed", `collected immediately: ${varKey}`, session.currentStepId, 0);
+              break;
+            }
+            outboundMsg = promptText;
+            lastPreview = { type: "text", body: promptText };
+            if (/^\d{10,15}$/.test(threadId)) {
+              const creds = await getCredentials(adminId);
+              if (creds) {
+                await sendTextMessage({
+                  credentials: creds,
+                  mobile: session.threadId,
+                  message: promptText,
+                });
+                sentViaCpaas = true;
               }
             }
             session.waitingForInput = true;
@@ -1051,114 +1069,125 @@ export async function runWorkflow(
           const validOptions = Array.isArray(step.validOptions)
             ? (step.validOptions as string[])
             : [];
+          const validationType = (step as any).validation ?? "text";
 
-          if (validOptions.length > 0) {
-            const lowered = validOptions.map((v: string) => v.toLowerCase());
-            if (!lowered.includes(rawInput.toLowerCase())) {
+          // Check 1: validOptions whitelist (existing logic)
+          const failsWhitelist =
+            validOptions.length > 0 &&
+            !validOptions.map((v: string) => v.toLowerCase()).includes(rawInput.toLowerCase());
 
-              const stepQuestion = resolveTemplate(
-                step.prompt ?? step.inputPrompt ?? "",
-                data
-              );
+          // Check 2: format validation (calls existing evaluateValidation)
+          const failsValidation =
+            validationType !== "text" &&
+            !evaluateValidation(rawInput, validationType, step as any);
 
-              // --- AI INTENT GUARD: collect_input ---
-              const offTopic = await isOffTopicMessage(
-                rawInput,
-                stepQuestion,
-                validOptions,
-                adminId,
-                threadId
-              );
+          if (failsWhitelist || failsValidation) {
+            const stepQuestion = resolveTemplate(
+              step.prompt ?? step.inputPrompt ?? "",
+              data
+            );
 
-              if (offTopic) {
-                const wfContext = buildWorkflowContext(session, workflow, stepQuestion);
-                await handleOffTopicReply(
-                  rawInput,
-                  stepQuestion,
-                  wfContext,
-                  adminId,
-                  threadId,
-                  session
-                );
-                session.lastActivityAt = new Date();
-                await session.save();
-                continueLoop = false;
-                await logStepExit(executionLogId, "waiting", "off-topic handled by RAG", session.currentStepId, 0);
-                break;
-              }
-              // --- END AI INTENT GUARD ---
-
-              // ON-TOPIC but invalid — retry logic
-              const retryKey = `__retries_${step.id}`;
-              const retries =
-                parseInt(session.collectedData.get(retryKey) ?? "0") + 1;
-              session.collectedData.set(retryKey, String(retries));
-              session.markModified("collectedData");
-
-              const maxRetries = (step as any).maxRetries ?? 3;
-
-              if (retries >= maxRetries) {
-                if ((step as any).onMaxRetries) {
-                  session.currentStepId = (step as any).onMaxRetries;
-                  session.waitingForInput = false;
-                  await session.save();
-                  continueLoop = true;
-                  await logStepExit(
-                    executionLogId,
-                    "completed",
-                    "max retries → onMaxRetries",
-                    session.currentStepId,
-                    retries
-                  );
-                  break;
-                } else {
-                  session.done = true;
-                  session.waitingForInput = false;
-                  session.lastActivityAt = new Date();
-                  session.markModified("collectedData");
-                  await session.save();
-                  continueLoop = false;
-                  await logStepExit(
-                    executionLogId,
-                    "error",
-                    "max retries exceeded",
-                    session.currentStepId,
-                    retries
-                  );
-                  break;
-                }
-              }
-
-              // Under retry limit — send retryPrompt and wait again
-              const retryMsg = resolveTemplate(
-                (step as any).retryPrompt ?? stepQuestion,
-                data
-              );
-              outboundMsg = retryMsg;
-              lastPreview = { type: "text", body: retryMsg };
-              if (/^\d{10,15}$/.test(threadId)) {
-                const creds = await getCredentials(adminId);
-                if (creds) {
-                  await sendTextMessage({
-                    credentials: creds,
-                    mobile: session.threadId,
-                    message: retryMsg,
-                  });
-                }
-              }
-              session.waitingForInput = true;
-              session.currentStepId = step.id;
-              continueLoop = false;
+            // ── AI INTENT GUARD: collect_input ────────────────────────────────
+            const offTopic = await isOffTopicMessage(
+              rawInput,
+              stepQuestion,
+              validOptions,
+              adminId,
+              threadId
+            );
+            if (offTopic) {
+              const wfContext = buildWorkflowContext(session, workflow, stepQuestion);
+              await handleOffTopicReply(rawInput, stepQuestion, wfContext, adminId, threadId, session);
+              session.lastActivityAt = new Date();
               await session.save();
-              await logStepExit(
-                executionLogId,
-                "waiting",
-                `invalid — retry ${retries}/${maxRetries}`,
-                session.currentStepId,
-                retries
-              );
+              continueLoop = false;
+              await logStepExit(executionLogId, "waiting", "off-topic handled by RAG", session.currentStepId, 0);
               break;
             }
+            // ── END AI INTENT GUARD ───────────────────────────────────────────
+
+            // Retry logic
+            const retryKey = `__retries_${step.id}`;
+            const retries =
+              parseInt(session.collectedData.get(retryKey) ?? "0") + 1;
+            session.collectedData.set(retryKey, String(retries));
+            session.markModified("collectedData");
+
+            const maxRetries = (step as any).maxRetries ?? 3;
+
+            if (retries >= maxRetries) {
+              if ((step as any).onMaxRetries) {
+                session.currentStepId = (step as any).onMaxRetries;
+                session.waitingForInput = false;
+                await session.save();
+                continueLoop = true;
+                await logStepExit(
+                  executionLogId,
+                  "completed",
+                  "max retries → onMaxRetries",
+                  session.currentStepId,
+                  retries
+                );
+                break;
+              } else {
+                session.done = true;
+                session.waitingForInput = false;
+                session.lastActivityAt = new Date();
+                session.markModified("collectedData");
+                await session.save();
+                continueLoop = false;
+                await logStepExit(
+                  executionLogId,
+                  "error",
+                  "max retries exceeded",
+                  session.currentStepId,
+                  retries
+                );
+                break;
+              }
+            }
+
+            // Under retry limit — build validation-aware retry message
+            let retryMsg: string;
+            if ((step as any).retryPrompt) {
+              retryMsg = resolveTemplate((step as any).retryPrompt, data);
+            } else if (failsValidation) {
+              const typeLabels: Record<string, string> = {
+                phone:  "a valid phone number (digits only, 10–15 digits)",
+                email:  "a valid email address",
+                date:   "a valid date",
+                number: "a valid number",
+                regex:  "a value matching the required format",
+              };
+              retryMsg = `Please enter ${typeLabels[validationType] ?? "a valid value"}.`;
+            } else {
+              retryMsg = stepQuestion;
+            }
+
+            outboundMsg = retryMsg;
+            lastPreview = { type: "text", body: retryMsg };
+            if (/^\d{10,15}$/.test(threadId)) {
+              const creds = await getCredentials(adminId);
+              if (creds) {
+                await sendTextMessage({
+                  credentials: creds,
+                  mobile: session.threadId,
+                  message: retryMsg,
+                });
+              }
+            }
+            session.waitingForInput = true;
+            session.currentStepId = step.id;
+            continueLoop = false;
+            await session.save();
+            await logStepExit(
+              executionLogId,
+              "waiting",
+              `invalid — retry ${retries}/${maxRetries}`,
+              session.currentStepId,
+              retries
+            );
+            break;
           }
 
           clearAwaitingState(session);
@@ -1878,85 +1907,88 @@ export async function runWorkflow(
           break;
         }
 
-        // ── ai_router ─────────────────────────────────────────────────────────
-        case "ai_router": {
+        // ── ai_node ───────────────────────────────────────────────────────────
+        case "ai_node": {
           await logStepEntry(executionLogId, step.id, step.type, lastMessage);
 
-          const arc = (step as any).aiRouterConfig;
-          if (!arc || !Array.isArray(arc.routes) || arc.routes.length === 0) {
-            session.currentStepId = arc?.defaultNextStep ?? "END";
-            continueLoop = true;
-            await logStepExit(executionLogId, "completed", "skipped: missing config", session.currentStepId, 0);
-            break;
-          }
-
-          const startTime = Date.now();
-          let routerNext: string = arc.defaultNextStep ?? "END";
-          let matchedLabel = "default";
+          const aiNodeStart = Date.now();
+          let aiNodeReply = "";
 
           try {
+            // 1. Load AdminConfig for KB settings
+            const adminCfg = await AdminConfig.findOne({ adminId });
+            const collectionName = adminCfg?.kb?.collectionName ?? "";
+            const maxResults = adminCfg?.kb?.maxResults ?? 5;
+
+            // 2. Resolve {{vars}} in the admin-authored prompt
+            const resolvedPrompt = resolveTemplate((step as any).aiNodePrompt ?? "", data);
+
+            // 3. RAG retrieval
+            let kbContext = "";
+            if (collectionName) {
+              const docs = await retrieve(lastMessage, adminId, collectionName, maxResults);
+              kbContext = Array.isArray(docs) ? docs.join("\n\n") : String(docs ?? "");
+            }
+
+            // 4. Build system prompt
+            const systemPrompt = kbContext
+              ? `${resolvedPrompt}\n\nKnowledge Base:\n${kbContext}`
+              : resolvedPrompt;
+
+            // 5. Call LLM
             const { ChatGoogleGenerativeAI } = await import("@langchain/google-genai");
             const llm = new ChatGoogleGenerativeAI({
-              model: "gemini-2.0-flash",
+              model: "gemini-2.5-flash",
               temperature: 0,
               apiKey: process.env.GOOGLE_API_KEY,
             });
 
-            const routeList = (arc.routes as { label: string; nextStep: string }[])
-              .map((r, i) => `${i + 1}. ${r.label}`)
-              .join("\n");
+            const lastMsg = String(data["last_message"] ?? lastMessage);
+            const llmResult = await llm.invoke([
+              new SystemMessage(systemPrompt),
+              new HumanMessage(lastMsg),
+            ]);
+            const latencyMs = Date.now() - aiNodeStart;
 
-            const promptContent =
-              `Classify this message into one of these intents:\n${routeList}\n\n` +
-              `Message: ${lastMessage}\n\n` +
-              `Reply with only the number (1 to ${arc.routes.length}) or 0 if none match.`;
-
-            const msgs: Array<{ role: string; content: string }> = [];
-            if (arc.systemPrompt) {
-              msgs.push({ role: "system", content: resolveTemplate(arc.systemPrompt, data) });
+            // 6. Extract reply text (handle both string and array content)
+            if (typeof llmResult.content === "string") {
+              aiNodeReply = llmResult.content.trim();
+            } else if (Array.isArray(llmResult.content)) {
+              aiNodeReply = llmResult.content
+                .map((c: any) => (typeof c === "string" ? c : c?.text ?? ""))
+                .join("")
+                .trim();
             }
-            msgs.push({ role: "user", content: promptContent });
 
-            const result = await llm.invoke(msgs);
-            const latencyMs = Date.now() - startTime;
-
+            // Fire-and-forget usage logging
             const usage =
-              (result as any).response_metadata?.usage ??
-              (result as any).usage_metadata ?? {};
+              (llmResult as any).response_metadata?.usage ??
+              (llmResult as any).usage_metadata ?? {};
             const inputTokens  = usage.input_tokens  ?? usage.prompt_tokens  ?? 0;
             const outputTokens = usage.output_tokens ?? usage.completion_tokens ?? 0;
             const totalTokens  = usage.total_tokens  ?? (inputTokens + outputTokens);
-
             UsageLog.create({
               adminId,
               threadId,
-              modelName: "gemini-2.0-flash",
+              modelName: "gemini-2.5-flash",
               inputTokens,
               outputTokens,
               totalTokens,
               source: threadId.startsWith("admin-test") ? "test" : "whatsapp",
               latencyMs,
               status: "success",
-            }).catch((err) => console.error("[UsageLog] Failed to save usage:", err));
+            }).catch((err) => console.error("[UsageLog] ai_node failed to save usage:", err));
 
-            const raw = String(result.content).trim();
-            const parsed = parseInt(raw, 10);
-
-            if (!isNaN(parsed) && parsed >= 1 && parsed <= arc.routes.length) {
-              const route = (arc.routes as { label: string; nextStep: string }[])[parsed - 1];
-              routerNext = route.nextStep;
-              matchedLabel = route.label;
-            }
-          } catch (routerErr) {
-            const latencyMs = Date.now() - startTime;
+          } catch (aiNodeErr) {
+            const latencyMs = Date.now() - aiNodeStart;
             console.error(
-              "[ai_router] LLM failed, falling back to default:",
-              routerErr instanceof Error ? routerErr.message : routerErr
+              "[ai_node] LLM failed:",
+              aiNodeErr instanceof Error ? aiNodeErr.message : aiNodeErr
             );
             UsageLog.create({
               adminId,
               threadId,
-              modelName: "gemini-2.0-flash",
+              modelName: "gemini-2.5-flash",
               inputTokens: 0,
               outputTokens: 0,
               totalTokens: 0,
@@ -1966,10 +1998,30 @@ export async function runWorkflow(
             }).catch(() => {});
           }
 
-          console.log(`[ai_router] step=${step.id} | matched=${matchedLabel} | next=${routerNext}`);
-          session.currentStepId = routerNext;
-          continueLoop = true;
-          await logStepExit(executionLogId, "completed", `matched: ${matchedLabel}`, session.currentStepId, 0);
+          // 7. Store response if configured
+          if ((step as any).storeResponseAs && aiNodeReply) {
+            session.collectedData.set((step as any).storeResponseAs, aiNodeReply);
+            session.markModified("collectedData");
+          }
+
+          // 8. Send to user via CPaaS (real phone threads only)
+          if (aiNodeReply && /^\d{10,15}$/.test(threadId)) {
+            const creds = await getCredentials(adminId);
+            if (creds) {
+              await sendTextMessage({
+                credentials: creds,
+                mobile: session.threadId,
+                message: aiNodeReply,
+              });
+              sentViaCpaas = true;
+            }
+          }
+
+          // 9. Advance session
+          outboundMsg = aiNodeReply || null;
+          session.currentStepId = step.nextStep ?? "END";
+          continueLoop = session.currentStepId !== "END";
+          await logStepExit(executionLogId, "completed", `ai_node replied (${aiNodeReply.length} chars)`, session.currentStepId, 0);
           break;
         }
 

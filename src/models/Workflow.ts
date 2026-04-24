@@ -31,7 +31,9 @@ const StepSchema = new Schema(
         "send_menu",
         "loop",
         "send_media",
-        "ai_router",
+        "ai_node",
+        "assign_agent",
+        "assign_label",
       ],
       required: true,
     },
@@ -156,17 +158,9 @@ const StepSchema = new Schema(
       },
     },
 
-    // type: "ai_router"
-    aiRouterConfig: {
-      systemPrompt: { type: String },
-      routes: [
-        {
-          label: { type: String },
-          nextStep: { type: String },
-        },
-      ],
-      defaultNextStep: { type: String },
-    },
+    // type: "ai_node"
+    aiNodePrompt:    { type: String },
+    storeResponseAs: { type: String },
   },
   { _id: false }
 );
@@ -193,7 +187,7 @@ export interface IWorkflowStep {
     | "send_menu"
     | "loop"
     | "send_media"
-    | "ai_router";
+    | "ai_node";
   nextStep?: string;
   message?: string;
   mediaType?: string;
@@ -261,11 +255,8 @@ export interface IWorkflowStep {
       value?: string;
     };
   };
-  aiRouterConfig?: {
-    systemPrompt?: string;
-    routes: { label: string; nextStep: string }[];
-    defaultNextStep: string;
-  };
+  aiNodePrompt?:    string;
+  storeResponseAs?: string;
 }
 
 export interface IWorkflow extends Document {
