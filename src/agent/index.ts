@@ -87,7 +87,7 @@ export async function runAgent(adminId: string, message: string, threadId: strin
 
   // ── RAG retrieval ONCE before graph (not inside graph loop) ──────────────
   const kbContext = config.tools.search_knowledge_base
-    ? await retrieve(message, adminId, config.kb.collectionName, config.kb.maxResults)
+    ? await retrieve(message, adminId, config.kb.maxResults)
     : "";
 
   // ── Fetch ticket keywords if tool is enabled ──────────────────────────────

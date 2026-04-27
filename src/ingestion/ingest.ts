@@ -108,12 +108,14 @@ export async function ingest(
   }
 
   // Tag metadata
-  const taggedChunks = chunks.map((chunk) => ({
+  const taggedChunks = chunks.map((chunk, index) => ({
     ...chunk,
     metadata: {
       ...chunk.metadata,
       adminId,
       source: filename,
+      type: "pdf",
+      chunkIndex: index,
       page: chunk.metadata.pageNumber ?? 0,
     },
   }));
@@ -161,10 +163,10 @@ export async function ingestText(
   }
 
   const documents = rawChunks.map(
-    (text) =>
+    (text, index) =>
       new Document({
         pageContent: text,
-        metadata: { adminId, source: sourceName, type: "text" },
+        metadata: { adminId, source: sourceName, type: "text", chunkIndex: index },
       })
   );
 
@@ -239,10 +241,10 @@ export async function ingestURL(
   }
 
   const documents = rawChunks.map(
-    (chunkText) =>
+    (chunkText, index) =>
       new Document({
         pageContent: chunkText,
-        metadata: { adminId, source: url, title, type: "url" },
+        metadata: { adminId, source: url, title, type: "url", chunkIndex: index },
       })
   );
 

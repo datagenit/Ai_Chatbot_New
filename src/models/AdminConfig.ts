@@ -9,7 +9,6 @@ export interface IAdminConfig extends Document {
     create_ticket: boolean;
   };
   kb: {
-    collectionName: string;
     maxResults: number;
   };
   conversationTtlDays: number;
@@ -44,10 +43,6 @@ const AdminConfigSchema = new Schema<IAdminConfig>({
     },
   },
   kb: {
-    collectionName: {
-      type: String,
-      default: "kb_default",
-    },
     maxResults: {
       type: Number,
       default: 5,

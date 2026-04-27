@@ -15,14 +15,12 @@ const embeddings = new HuggingFaceTransformersEmbeddings({
  * Retrieves relevant chunks from Pinecone for a query.
  * @param query - Search query string
  * @param adminId - Admin identifier for multi-tenant isolation
- * @param collectionName - Ignored (kept for signature compatibility — namespace is always kb_{adminId})
  * @param maxResults - Optional max results (defaults to 5)
  * @returns Relevant chunks as a concatenated string
  */
 export async function retrieve(
   query: string,
   adminId: string,
-  collectionName?: string, // retained for drop-in compatibility, unused
   maxResults: number = 5
 ): Promise<string> {
   const namespace = `kb_${adminId}`;

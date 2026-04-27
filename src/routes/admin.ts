@@ -54,6 +54,25 @@ router.post("/upload", (req: AuthRequest, res: Response, next) => {
     }
 
     const adminId = req.adminId!;
+
+    const isDuplicate = await checkDuplicateSource(adminId, req.file.originalname);
+    if (isDuplicate) {
+      res.status(409).json({
+        success: false,
+        error: "A document with this name already exists in your knowledge base",
+      });
+      return;
+    }
+
+    const limitReached = await checkAdminSourceLimit(adminId, "pdf");
+    if (limitReached) {
+      res.status(429).json({
+        success: false,
+        error: "PDF source limit reached (max 25). Delete existing sources to add new ones.",
+      });
+      return;
+    }
+
     const { chunks, vectorIds, content } = await ingest(
       req.file.buffer,
       req.file.originalname,
@@ -290,7 +309,6 @@ router.get("/me", async (req: AuthRequest, res: Response) => {
             create_ticket: false,
           },
           kb: {
-            collectionName: `kb_${adminId}`,
             maxResults: 5,
           },
           conversationTtlDays: 30,
@@ -343,7 +361,6 @@ router.post("/setup", async (req: AuthRequest, res: Response) => {
         search_web: tools?.search_web ?? false,
       },
       kb: {
-        collectionName: `kb_${adminId}`,   // always auto-set; never from client
         maxResults: kb?.maxResults ?? 5,
       },
     });

@@ -1922,7 +1922,6 @@ export async function runWorkflow(
           try {
             // 1. Load AdminConfig for KB settings
             const adminCfg = await AdminConfig.findOne({ adminId });
-            const collectionName = adminCfg?.kb?.collectionName ?? "";
             const maxResults = adminCfg?.kb?.maxResults ?? 5;
 
             // 2. Resolve {{vars}} in the admin-authored prompt
@@ -1930,8 +1929,8 @@ export async function runWorkflow(
 
             // 3. RAG retrieval
             let kbContext = "";
-            if (collectionName) {
-              const docs = await retrieve(lastMessage, adminId, collectionName, maxResults);
+            if (adminCfg) {
+              const docs = await retrieve(lastMessage, adminId, maxResults);
               kbContext = Array.isArray(docs) ? docs.join("\n\n") : String(docs ?? "");
             }
 

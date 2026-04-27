@@ -46,12 +46,9 @@ export async function checkDuplicateSource(
 
 export async function checkAdminSourceLimit(
   adminId: string,
-  type: "text" | "url"
+  type: "text" | "url" | "pdf"
 ): Promise<boolean> {
-  const count = await UploadedFile.countDocuments({
-    adminId,
-    filePath: type === "text" ? "text-input" : { $regex: "^http" },
-  });
+  const count = await UploadedFile.countDocuments({ adminId, type });
   return count >= SOURCE_LIMIT;
 }
 
