@@ -10,11 +10,40 @@ import { runAutomations } from "../automations/engine.js";
 import UsageLog from "../models/UsageLog.js";
 import WorkflowSession from "../models/WorkflowSession.js";
 import Workflow from "../models/Workflow.js";
+import Conversation from "../models/Conversation.js";
 import { runWorkflow } from "../workflows/engine.js";
 import { matchWorkflowTrigger } from "../workflows/triggerMatcher.js";
 import { isThreadDelayed } from "../workflows/delayScheduler.js";
 import { apiLimiter, chatLimiter, credentialsLimiter } from "../middleware/rateLimiter.js";
 import { sanitizeInput } from "../middleware/sanitize.js";
+
+async function saveWorkflowTurn(
+  threadId: string,
+  adminId: string,
+  userMessage: string,
+  botMessage: string
+): Promise<void> {
+  if (!botMessage?.trim()) return;
+  try {
+    const now = Date.now();
+    await Conversation.findOneAndUpdate(
+      { threadId, adminId },
+      {
+        $push: {
+          messages: {
+            $each: [
+              { role: "human", content: userMessage, timestamp: new Date(now) },
+              { role: "ai", content: botMessage, timestamp: new Date(now + 1) },
+            ],
+          },
+        },
+      },
+      { upsert: true }
+    );
+  } catch (err) {
+    console.error("[saveWorkflowTurn] failed:", err);
+  }
+}
 
 const router = Router();
 
@@ -52,12 +81,13 @@ router.post("/chat", chatLimiter, authMiddleware, async (req: AuthRequest, res) 
     console.log('[Chat] activeSession:', !!activeSession, activeSession ? `stepId: ${activeSession.currentStepId} | waiting: ${activeSession.waitingForInput}` : '');
     if (activeSession) {
       try {
-        const { text, preview } = await runWorkflow(threadId, adminId, input);
-        console.log("[Chat] wfResult:", { text, preview });
+        const result = await runWorkflow(threadId, adminId, input);
+        saveWorkflowTurn(threadId, adminId, result.resolvedInput ?? input, result.text);
+        console.log("[Chat] wfResult:", { text: result.text, preview: result.preview });
         res.json({
           success: true,
-          response: text,
-          preview: preview ?? null,
+          response: result.text,
+          preview: result.preview ?? null,
           threadId,
         });
         return;
@@ -96,11 +126,12 @@ router.post("/chat", chatLimiter, authMiddleware, async (req: AuthRequest, res) 
             validReplyLabels: [],
             promptText: "",
           });
-          const { text, preview } = await runWorkflow(threadId, adminId, input);
+          const result = await runWorkflow(threadId, adminId, input);
+          saveWorkflowTurn(threadId, adminId, result.resolvedInput ?? input, result.text);
           res.json({
             success: true,
-            response: text,
-            preview: preview ?? null,
+            response: result.text,
+            preview: result.preview ?? null,
             threadId,
           });
           return;

@@ -1,8 +1,6 @@
 import { Router, Response } from "express";
 import multer from "multer";
 import path from "path";
-import fs from "fs";
-import { fileURLToPath } from "url";
 import { ingest, ingestText, ingestURL } from "../ingestion/ingest.js";
 import {
   validateURL,
@@ -20,28 +18,14 @@ import MissedQuery from "../models/MissedQuery.js";
 const router = Router();
 
 // ── Multer setup for file uploads ──────────────────────────────────────────
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => {
-    cb(null, path.join(__dirname, "../uploads"));
-  },
-  filename: (_req, file, cb) => {
-    const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-    cb(null, `${file.fieldname}-${uniqueSuffix}${path.extname(file.originalname)}`);
-  },
-});
-
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   limits: {
     fileSize: 50 * 1024 * 1024, // 50MB
   },
   fileFilter: (_req, file, cb) => {
-    const allowedExtensions = ['.pdf'];
     const ext = path.extname(file.originalname).toLowerCase();
-    if (allowedExtensions.includes(ext)) {
+    if (ext === ".pdf") {
       cb(null, true);
     } else {
       cb(new Error(`File type ${ext} is not allowed`));
@@ -70,14 +54,20 @@ router.post("/upload", (req: AuthRequest, res: Response, next) => {
     }
 
     const adminId = req.adminId!;
-    const { chunks, vectorIds } = await ingest(req.file.path, adminId);
+    const { chunks, vectorIds, content } = await ingest(
+      req.file.buffer,
+      req.file.originalname,
+      adminId
+    );
 
     const savedDoc = await UploadedFile.create({
       adminId,
       originalName: req.file.originalname,
-      filePath: req.file.path,
+      filePath: req.file.originalname,
       chunks,
       vectorIds,
+      content,
+      type: "pdf",
     });
 
     res.json({
@@ -136,6 +126,7 @@ router.post("/upload/text", async (req: AuthRequest, res: Response) => {
       chunks,
       vectorIds,
       content,
+      type: "text",
     });
 
     res.json({
@@ -199,6 +190,7 @@ router.post("/upload/url", async (req: AuthRequest, res: Response) => {
       chunks: result.chunks,
       vectorIds: result.vectorIds,
       content: result.content,
+      type: "url",
     });
 
     res.json({
@@ -268,16 +260,6 @@ router.delete("/documents/:id", async (req: AuthRequest, res: Response) => {
     }
 
     await deleteVectors(adminId, doc.vectorIds);
-
-    // Only attempt file deletion for actual PDF files
-    if (doc.filePath && !doc.filePath.startsWith('text-input') && !doc.filePath.startsWith('http')) {
-      try {
-        if (fs.existsSync(doc.filePath)) fs.unlinkSync(doc.filePath);
-      } catch (fileErr) {
-        console.warn(`[Upload] Could not delete file ${doc.filePath}:`, fileErr);
-      }
-    }
-
 
     await doc.deleteOne();
 
@@ -596,36 +578,6 @@ router.patch("/conversation-ttl", async (req: AuthRequest, res: Response) => {
     });
   }
 });
-
-router.get("/documents/:id/file", async (req: AuthRequest, res: Response) => {
-  try {
-    const doc = await UploadedFile.findOne({
-      _id: req.params.id,
-      adminId: req.adminId,
-    });
-
-    if (!doc) {
-      res.status(404).json({ success: false, error: "Document not found" });
-      return;
-    }
-
-    if (!doc.filePath || !fs.existsSync(doc.filePath)) {
-      res.status(404).json({ success: false, error: "File not found on server" });
-      return;
-    }
-
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      `inline; filename="${doc.originalName}"` // inline = open in browser, not download
-    );
-
-    fs.createReadStream(doc.filePath).pipe(res);
-  } catch (err) {
-    res.status(500).json({ success: false, error: "Failed to serve file" });
-  }
-});
-
 
 // ── GET /api/admin/usage ─────────────────────────────────────────────────────
 router.get("/usage", async (req: AuthRequest, res: Response) => {

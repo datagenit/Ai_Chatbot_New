@@ -600,7 +600,7 @@ export async function runWorkflow(
   threadId: string,
   adminId: string,
   lastMessage: string
-): Promise<{ text: string; preview: object | null }> {
+): Promise<{ text: string; preview: object | null; resolvedInput?: string }> {
   try {
     const session = await WorkflowSession.findOne({ threadId, done: false });
     if (!session) return { text: "", preview: null };
@@ -670,6 +670,7 @@ export async function runWorkflow(
     let outboundMsg: string | null = null;
     let sentViaCpaas = false;
     let lastPreview: object | null = null;
+    let resolvedInput: string | undefined = undefined;
     let continueLoop = true;
 
     while (continueLoop) {
@@ -954,6 +955,8 @@ export async function runWorkflow(
           if (step.saveResponseTo) {
             session.collectedData.set(step.saveResponseTo, resolvedLabel);
           }
+          const replyStepId = session.awaitingStepId ?? step.id;
+          resolvedInput = session.collectedData.get(`__menu_reply_${replyStepId}_title`) as string | undefined;
           session.markModified("collectedData");
           clearAwaitingState(session);
           session.waitingForInput = false;
@@ -1733,6 +1736,8 @@ export async function runWorkflow(
           if (step.saveResponseTo) {
             session.collectedData.set(step.saveResponseTo, resolvedLabel);
           }
+          const replyStepId = session.awaitingStepId ?? step.id;
+          resolvedInput = session.collectedData.get(`__menu_reply_${replyStepId}_title`) as string | undefined;
           session.markModified("collectedData");
           clearAwaitingState(session);
           session.waitingForInput = false;
@@ -2060,7 +2065,7 @@ export async function runWorkflow(
     console.log("[Engine] saving session, delayUntil:", session.delayUntil);
     await session.save();
 
-    return { text: outboundMsg ?? "", preview: lastPreview };
+    return { text: outboundMsg ?? "", preview: lastPreview, resolvedInput };
   } catch (err) {
     console.error("[WorkflowEngine] error:", err instanceof Error ? err.message : err);
     return { text: "", preview: null };

@@ -1,15 +1,15 @@
 // src/ingestion/ingest.ts
-import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
 import { Document } from "@langchain/core/documents";
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 import { Pinecone as PineconeClient } from "@pinecone-database/pinecone";
 import { PineconeStore } from "@langchain/pinecone";
 import { HuggingFaceTransformersEmbeddings } from "@langchain/community/embeddings/huggingface_transformers";
 import { v4 as uuidv4 } from "uuid";
-import { fromPath } from "pdf2pic";
+import { fromBuffer } from "pdf2pic";
 import Tesseract from "tesseract.js";
 import axios from "axios";
 import * as cheerio from "cheerio";
+import pdfParse from "pdf-parse/lib/pdf-parse.js";
 import { validateContentSize, validateMinContent } from "./safeguards.js";
 import { env } from "../config/env.js";
 
@@ -21,24 +21,31 @@ const embeddings = new HuggingFaceTransformersEmbeddings({
 
 /**
  * Ingests a PDF file into Pinecone for a specific admin.
- * @param filePath - Path to the PDF file
+ * @param buffer - PDF file bytes
+ * @param filename - Original PDF filename
  * @param adminId - Admin identifier for multi-tenant isolation
  * @returns Object with chunk count and vector IDs stored in Pinecone
  */
 export async function ingest(
-  filePath: string,
+  buffer: Buffer,
+  filename: string,
   adminId: string
-): Promise<{ chunks: number; vectorIds: string[] }> {
-  // Load PDF
-  const loader = new PDFLoader(filePath);
-  const documents = await loader.load();
+): Promise<{ chunks: number; vectorIds: string[]; content: string }> {
+  // Load PDF from memory buffer
+  const pdfData = await pdfParse(buffer);
+  const documents = [
+    new Document({
+      pageContent: pdfData.text,
+      metadata: { source: filename },
+    }),
+  ];
 
   // ── OCR enrichment — only for pages with little/no extracted text ─────────
   try {
     const pageCount = Math.min(documents.length, 20);
     const pageNumbers = Array.from({ length: pageCount }, (_, i) => i + 1);
 
-    const converter = fromPath(filePath, {
+    const converter = fromBuffer(buffer, {
       density: 150,
       format: "png",
       width: 1200,
@@ -78,7 +85,7 @@ export async function ingest(
 
   // ── Safeguards — validate and cap content before splitting ──────────────
   const fullText = documents.map((d) => d.pageContent).join("\n");
-  const safeText = validateContentSize(fullText, filePath);
+  const safeText = validateContentSize(fullText, filename);
   if (!validateMinContent(safeText)) {
     throw new Error("PDF has no extractable text content");
   }
@@ -106,7 +113,7 @@ export async function ingest(
     metadata: {
       ...chunk.metadata,
       adminId,
-      source: filePath,
+      source: filename,
       page: chunk.metadata.pageNumber ?? 0,
     },
   }));
@@ -122,7 +129,7 @@ export async function ingest(
     ids: vectorIds,
   } as any);
 
-  return { chunks: chunks.length, vectorIds };
+  return { chunks: chunks.length, vectorIds, content: safeText };
 }
 
 /**
