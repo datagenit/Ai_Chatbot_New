@@ -98,18 +98,21 @@ export async function ingest(
 
   // Split into chunks
   const textSplitter = new RecursiveCharacterTextSplitter({
-    chunkSize: 1000,
-    chunkOverlap: 200,
+    chunkSize: 1500,
+    chunkOverlap: 150,
+    separators: ["\n\n", "\n", ". ", "! ", "? ", " ", ""],
   });
   let chunks = await textSplitter.splitDocuments(mergedDocuments);
-  if (chunks.length > 50) {
-    console.warn("[ingest] PDF chunks capped at 50");
-    chunks = chunks.slice(0, 50);
+  if (chunks.length > 100) {
+    console.warn("[ingest] PDF chunks capped at 100");
+    chunks = chunks.slice(0, 100);
   }
 
   // Tag metadata
+  const totalChunks = chunks.length;
   const taggedChunks = chunks.map((chunk, index) => ({
     ...chunk,
+    pageContent: `[Source: ${filename} | Part ${index + 1} of ${totalChunks}]\n\n${chunk.pageContent}`,
     metadata: {
       ...chunk.metadata,
       adminId,
@@ -152,20 +155,22 @@ export async function ingestText(
   }
 
   const textSplitter = new RecursiveCharacterTextSplitter({
-    chunkSize: 1000,
-    chunkOverlap: 200,
+    chunkSize: 1500,
+    chunkOverlap: 150,
+    separators: ["\n\n", "\n", ". ", "! ", "? ", " ", ""],
   });
 
   let rawChunks = await textSplitter.splitText(safeContent);
-  if (rawChunks.length > 50) {
-    console.warn("[ingest] Text chunks capped at 50");
-    rawChunks = rawChunks.slice(0, 50);
+  if (rawChunks.length > 100) {
+    console.warn("[ingest] Text chunks capped at 100");
+    rawChunks = rawChunks.slice(0, 100);
   }
 
+  const totalChunks = rawChunks.length;
   const documents = rawChunks.map(
     (text, index) =>
       new Document({
-        pageContent: text,
+        pageContent: `[Source: ${sourceName} | Part ${index + 1} of ${totalChunks}]\n\n${text}`,
         metadata: { adminId, source: sourceName, type: "text", chunkIndex: index },
       })
   );
@@ -230,20 +235,22 @@ export async function ingestURL(
 
   // Split into chunks
   const textSplitter = new RecursiveCharacterTextSplitter({
-    chunkSize: 1000,
-    chunkOverlap: 200,
+    chunkSize: 1500,
+    chunkOverlap: 150,
+    separators: ["\n\n", "\n", ". ", "! ", "? ", " ", ""],
   });
 
   let rawChunks = await textSplitter.splitText(safeText);
-  if (rawChunks.length > 50) {
-    console.warn("[ingestURL] chunks capped at 50");
-    rawChunks = rawChunks.slice(0, 50);
+  if (rawChunks.length > 100) {
+    console.warn("[ingestURL] chunks capped at 100");
+    rawChunks = rawChunks.slice(0, 100);
   }
 
+  const totalChunks = rawChunks.length;
   const documents = rawChunks.map(
     (chunkText, index) =>
       new Document({
-        pageContent: chunkText,
+        pageContent: `[Source: ${title} | Part ${index + 1} of ${totalChunks}]\n\n${chunkText}`,
         metadata: { adminId, source: url, title, type: "url", chunkIndex: index },
       })
   );
