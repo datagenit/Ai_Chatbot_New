@@ -1930,8 +1930,9 @@ export async function runWorkflow(
             // 3. RAG retrieval
             let kbContext = "";
             if (adminCfg) {
-              const docs = await retrieve(lastMessage, adminId, maxResults);
-              kbContext = Array.isArray(docs) ? docs.join("\n\n") : String(docs ?? "");
+              const documentIds = step.documentIds?.length ? step.documentIds : undefined;
+              const context = await retrieve(lastMessage, adminId, maxResults, documentIds);
+              kbContext = context;
             }
 
             // 4. Build system prompt

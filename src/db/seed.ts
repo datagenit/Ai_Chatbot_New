@@ -21,7 +21,6 @@ async function seed() {
         create_ticket: true,
       },
       kb: {
-        collectionName: "kb_6737",
         maxResults: 5,
       },
     });
@@ -37,7 +36,6 @@ async function seed() {
         create_ticket: false,
       },
       kb: {
-        collectionName: "kb_admin2",
         maxResults: 3,
       },
     });

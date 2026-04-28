@@ -16,12 +16,14 @@ const embeddings = new HuggingFaceTransformersEmbeddings({
  * @param query - Search query string
  * @param adminId - Admin identifier for multi-tenant isolation
  * @param maxResults - Optional max results (defaults to 5)
+ * @param documentIds - When non-empty, restrict vectors to these KB document IDs (metadata `documentId`)
  * @returns Relevant chunks as a concatenated string
  */
 export async function retrieve(
   query: string,
   adminId: string,
-  maxResults: number = 5
+  maxResults: number = 5,
+  documentIds?: string[]
 ): Promise<string> {
   const namespace = `kb_${adminId}`;
 
@@ -33,7 +35,12 @@ export async function retrieve(
       namespace,
     });
 
-    const results = await vectorStore.similaritySearch(query, maxResults);
+    const filter =
+      documentIds?.length
+        ? { adminId, documentId: { $in: documentIds } }
+        : { adminId };
+
+    const results = await vectorStore.similaritySearch(query, maxResults, filter as any);
 
     if (!results.length) return "";
 

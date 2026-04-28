@@ -20,7 +20,6 @@ export function authMiddleware(
       res.status(401).json({ error: "Internal request missing user.parent_id" });
       return;
     }
-    console.log(`[Auth] IP bypass | adminId: ${adminId}`);
     req.adminId = adminId;
     next();
     return;

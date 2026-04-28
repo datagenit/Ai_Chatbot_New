@@ -161,6 +161,7 @@ const StepSchema = new Schema(
     // type: "ai_node"
     aiNodePrompt:    { type: String },
     storeResponseAs: { type: String },
+    documentIds:     [{ type: String }],
   },
   { _id: false }
 );
@@ -257,6 +258,7 @@ export interface IWorkflowStep {
   };
   aiNodePrompt?:    string;
   storeResponseAs?: string;
+  documentIds?: string[];
 }
 
 export interface IWorkflow extends Document {
