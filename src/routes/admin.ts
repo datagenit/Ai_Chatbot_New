@@ -349,6 +349,7 @@ router.post("/setup", async (req: AuthRequest, res: Response) => {
         get_current_datetime?: boolean;
         search_knowledge_base?: boolean;
         search_web?: boolean;
+        create_ticket?: boolean;
       };
       kb?: { maxResults?: number };
     };
@@ -359,6 +360,7 @@ router.post("/setup", async (req: AuthRequest, res: Response) => {
         get_current_datetime: tools?.get_current_datetime ?? true,
         search_knowledge_base: tools?.search_knowledge_base ?? true,
         search_web: tools?.search_web ?? false,
+        create_ticket: tools?.create_ticket ?? false,
       },
       kb: {
         maxResults: kb?.maxResults ?? 5,
@@ -439,6 +441,7 @@ router.patch("/tools", async (req: AuthRequest, res: Response) => {
         get_current_datetime?: boolean;
         search_knowledge_base?: boolean;
         search_web?: boolean;
+        create_ticket?: boolean;
       };
     };
 
@@ -457,6 +460,9 @@ router.patch("/tools", async (req: AuthRequest, res: Response) => {
     }
     if (typeof tools.search_web === "boolean") {
       setFields["tools.search_web"] = tools.search_web;
+    }
+    if (typeof tools.create_ticket === "boolean") {
+      setFields["tools.create_ticket"] = tools.create_ticket;
     }
 
     const config = await AdminConfig.findOneAndUpdate(
