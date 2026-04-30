@@ -1,14 +1,14 @@
 // src/ingestion/retriever.ts
 import { Pinecone as PineconeClient } from "@pinecone-database/pinecone";
 import { PineconeStore } from "@langchain/pinecone";
-import { HuggingFaceTransformersEmbeddings } from 
-"@langchain/community/embeddings/huggingface_transformers";
+import { HuggingFaceTransformersEmbeddings } from
+  "@langchain/community/embeddings/huggingface_transformers";
 import { env, PINECONE_NS_PREFIX } from "../config/env.js";
 
 const pinecone = new PineconeClient({ apiKey: env.PINECONE_API_KEY });
 
 const embeddings = new HuggingFaceTransformersEmbeddings({
-  model: "Xenova/all-MiniLM-L6-v2", 
+  model: "Xenova/all-MiniLM-L6-v2",
 });
 
 /**
@@ -51,12 +51,22 @@ export async function retrieve(
     return "";
   }
 }
-export async function deleteVectors(adminId: string, vectorIds: string[]): Promise<void> {
+export async function deleteVectors(
+  adminId: string,
+  vectorIds: string[],
+  documentId?: string
+): Promise<void> {
   const namespace = `${PINECONE_NS_PREFIX}kb_${adminId}`;
-  const pineconeIndex = pinecone.Index(env.PINECONE_INDEX_NAME);
-  const namespacedIndex = pineconeIndex.namespace(namespace);
-  await namespacedIndex.deleteMany(vectorIds);
-  console.log(`[Pinecone] Deleted ${vectorIds.length} vectors from namespace: ${namespace}`);
+  const namespacedIndex = pinecone.Index(env.PINECONE_INDEX_NAME).namespace(namespace);
+
+  if (vectorIds.length > 0) {
+    await namespacedIndex.deleteMany(vectorIds);
+    console.log(`[Pinecone] Deleted ${vectorIds.length} vectors from ${namespace}`);
+  } else {
+    // Serverless Pinecone does NOT support metadata filter deletes.
+    // If vectorIds is empty, this is an old doc — log and skip.
+    console.warn(`[Pinecone] Cannot delete vectors for doc ${documentId ?? "unknown"} — vectorIds missing (old document). Clean up manually.`);
+  }
 }
 
 export async function ensureIndex(): Promise<void> {

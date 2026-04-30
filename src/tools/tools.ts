@@ -7,6 +7,18 @@ import { createTicketAPI } from "../services/cpaas.js";
 import AdminConfig from "../models/AdminConfig.js";
 import Conversation from "../models/Conversation.js";
 import MissedQuery from "../models/MissedQuery.js";
+import { HuggingFaceTransformersEmbeddings } from "@langchain/community/embeddings/huggingface_transformers";
+
+const embeddings = new HuggingFaceTransformersEmbeddings({
+  model: "Xenova/all-MiniLM-L6-v2",
+});
+
+function cosineSimilarity(a: number[], b: number[]): number {
+  const dot = a.reduce((sum, v, i) => sum + v * (b[i] ?? 0), 0);
+  const magA = Math.sqrt(a.reduce((sum, v) => sum + v * v, 0));
+  const magB = Math.sqrt(b.reduce((sum, v) => sum + v * v, 0));
+  return magA && magB ? dot / (magA * magB) : 0;
+}
 
 const getCurrentDatetime = tool(
   async () => {
@@ -198,12 +210,48 @@ export const logMissedQuery = tool(
       const adminId = (config as any)?.configurable?.adminId;
       if (!adminId) return "logged";
 
-      await MissedQuery.create({
+      const source = threadId.startsWith("admin-test") ? "test" : "whatsapp";
+
+      // Embed the incoming query
+      const [vector] = await embeddings.embedDocuments([query]);
+
+      // Fetch all open queries for this admin that have an embedding
+      const existing = await MissedQuery.find({
         adminId,
-        threadId,
-        query,
-        source: threadId.startsWith("admin-test") ? "test" : "whatsapp",
-      });
+        status: "open",
+        embeddingVector: { $exists: true, $not: { $size: 0 } },
+      }).select("_id embeddingVector");
+
+      // Check cosine similarity — threshold 0.88
+      const THRESHOLD = 0.88;
+      let matched = null;
+      for (const doc of existing) {
+        const sim = cosineSimilarity(vector, doc.embeddingVector);
+        if (sim >= THRESHOLD) {
+          matched = doc;
+          break;
+        }
+      }
+
+      if (matched) {
+        // Duplicate — increment count and update lastSeenAt
+        await MissedQuery.findByIdAndUpdate(matched._id, {
+          $inc: { count: 1 },
+          $set: { lastSeenAt: new Date(), threadId },
+        });
+      } else {
+        // New unique query — save with embedding
+        await MissedQuery.create({
+          adminId,
+          threadId,
+          query,
+          source,
+          count: 1,
+          status: "open",
+          embeddingVector: vector,
+          lastSeenAt: new Date(),
+        });
+      }
 
       return "logged";
     } catch {

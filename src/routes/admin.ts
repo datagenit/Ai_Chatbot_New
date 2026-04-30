@@ -1,4 +1,5 @@
 import { Router, Response } from "express";
+import mongoose from "mongoose";
 import multer from "multer";
 import path from "path";
 import { ingest, ingestContent, ingestText, ingestURL } from "../ingestion/ingest.js";
@@ -8,6 +9,8 @@ import {
   checkAdminSourceLimit,
 } from "../ingestion/safeguards.js";
 import { deleteVectors } from "../ingestion/retriever.js";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+import { env } from "../config/env.js";
 import AdminConfig from "../models/AdminConfig.js";
 import UploadedFile from "../models/UploadedFile.js";
 import UsageLog from "../models/UsageLog.js";
@@ -73,13 +76,16 @@ router.post("/upload", (req: AuthRequest, res: Response, next) => {
       return;
     }
 
+    const newId = new mongoose.Types.ObjectId();
     const { chunks, vectorIds, content } = await ingest(
       req.file.buffer,
       req.file.originalname,
-      adminId
+      adminId,
+      String(newId)
     );
 
     const savedDoc = await UploadedFile.create({
+      _id: newId,
       adminId,
       originalName: req.file.originalname,
       filePath: req.file.originalname,
@@ -136,9 +142,16 @@ router.post("/upload/text", async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    const { chunks, vectorIds } = await ingestText(adminId, content.trim(), resolvedSourceName);
+    const newId = new mongoose.Types.ObjectId();
+    const { chunks, vectorIds } = await ingestText(
+      adminId,
+      content.trim(),
+      resolvedSourceName,
+      String(newId)
+    );
 
     const savedDoc = await UploadedFile.create({
+      _id: newId,
       adminId,
       originalName: resolvedSourceName,
       filePath: textFilePath,
@@ -200,9 +213,11 @@ router.post("/upload/url", async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    const result = await ingestURL(adminId, trimmedUrl);
+    const newId = new mongoose.Types.ObjectId();
+    const result = await ingestURL(adminId, trimmedUrl, String(newId));
 
     const savedDoc = await UploadedFile.create({
+      _id: newId,
       adminId,
       originalName: result.title,
       filePath: trimmedUrl,
@@ -322,7 +337,7 @@ router.delete("/documents/:id", async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    await deleteVectors(adminId, doc.vectorIds);
+    await deleteVectors(adminId, doc.vectorIds, String(doc._id));
 
     await doc.deleteOne();
 
@@ -811,28 +826,27 @@ router.delete("/usage", async (req: AuthRequest, res: Response) => {
   }
 });
 
-// ── GET /api/admin/missed-queries ─────────────────────────────────────────────
+// ── GET /api/admin/missed-queries ─────────────────────────────────────────
 router.get("/missed-queries", async (req: AuthRequest, res: Response) => {
   try {
     const adminId = req.adminId!;
-    const { from, to, limit: limitParam } = req.query as {
-      from?: string;
-      to?: string;
+    const { status = "open", limit: limitParam } = req.query as {
+      status?: string;
       limit?: string;
     };
 
-    const match: Record<string, unknown> = { adminId };
-    const dateFilter: Record<string, Date> = {};
-    if (from) dateFilter.$gte = new Date(from);
-    if (to) dateFilter.$lte = new Date(to);
-    if (Object.keys(dateFilter).length) match.createdAt = dateFilter;
+    const validStatuses = ["open", "dismissed", "added_to_kb", "all"];
+    const statusFilter = validStatuses.includes(status) ? status : "open";
 
-    const limitVal = Math.min(parseInt(limitParam ?? "50", 10) || 50, 200);
+    const match: Record<string, unknown> = { adminId };
+    if (statusFilter !== "all") match.status = statusFilter;
+
+    const limitVal = Math.min(parseInt(limitParam ?? "100", 10) || 100, 200);
 
     const queries = await MissedQuery.find(match)
-      .sort({ createdAt: -1 })
+      .sort({ count: -1, lastSeenAt: -1 })
       .limit(limitVal)
-      .select("_id query threadId source createdAt");
+      .select("_id query threadId source count status suggestedAnswer lastSeenAt createdAt");
 
     res.json({ success: true, data: queries, total: queries.length });
   } catch (err) {
@@ -843,7 +857,91 @@ router.get("/missed-queries", async (req: AuthRequest, res: Response) => {
   }
 });
 
-// ── DELETE /api/admin/missed-queries ──────────────────────────────────────────
+// ── PATCH /api/admin/missed-queries/:id ───────────────────────────────────
+router.patch("/missed-queries/:id", async (req: AuthRequest, res: Response) => {
+  try {
+    const { status } = req.body as { status?: string };
+    const validStatuses = ["open", "dismissed", "added_to_kb"];
+
+    if (!status || !validStatuses.includes(status)) {
+      res.status(400).json({
+        success: false,
+        error: `status must be one of: ${validStatuses.join(", ")}`,
+      });
+      return;
+    }
+
+    const doc = await MissedQuery.findOneAndUpdate(
+      { _id: req.params.id, adminId: req.adminId },
+      { $set: { status } },
+      { new: true }
+    );
+
+    if (!doc) {
+      res.status(404).json({ success: false, error: "Query not found" });
+      return;
+    }
+
+    res.json({ success: true, data: doc });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: err instanceof Error ? err.message : "Failed to update status",
+    });
+  }
+});
+
+// ── POST /api/admin/missed-queries/:id/suggest ────────────────────────────
+router.post("/missed-queries/:id/suggest", async (req: AuthRequest, res: Response) => {
+  try {
+    const doc = await MissedQuery.findOne({
+      _id: req.params.id,
+      adminId: req.adminId,
+    });
+
+    if (!doc) {
+      res.status(404).json({ success: false, error: "Query not found" });
+      return;
+    }
+
+    // Return cached suggestion if already generated
+    if (doc.suggestedAnswer) {
+      res.json({ success: true, suggestion: doc.suggestedAnswer });
+      return;
+    }
+
+    // Generate with Gemini Flash
+    const genAI = new GoogleGenerativeAI(env.GEMINI_API_KEY);
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+    const prompt = `A customer asked the following question that the AI could not answer from the knowledge base:
+
+"${doc.query}"
+
+Write a clear, accurate, and helpful knowledge base article answer for this question.
+- Be concise but complete (2-4 paragraphs max)
+- Use plain language
+- Do not include headers or markdown
+- Write as if you are directly answering the customer`;
+
+    const result = await model.generateContent(prompt);
+    const suggestion = result.response.text().trim();
+
+    // Cache it on the document
+    await MissedQuery.findByIdAndUpdate(doc._id, {
+      $set: { suggestedAnswer: suggestion },
+    });
+
+    res.json({ success: true, suggestion });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: err instanceof Error ? err.message : "Failed to generate suggestion",
+    });
+  }
+});
+
+// ── DELETE /api/admin/missed-queries ──────────────────────────────────────
 router.delete("/missed-queries", async (req: AuthRequest, res: Response) => {
   try {
     await MissedQuery.deleteMany({ adminId: req.adminId });

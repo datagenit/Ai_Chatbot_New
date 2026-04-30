@@ -62,11 +62,14 @@ export async function ingestContent(
 
   const vectorIds = documents.map(() => uuidv4());
 
-  await PineconeStore.fromDocuments(documents, embeddings, {
+  // PineconeStore.fromDocuments does NOT forward ids to addDocuments, so
+  // construct the store manually and pass ids explicitly — this makes the
+  // vectorIds we store in MongoDB actually match what Pinecone has.
+  const vectorStore = new PineconeStore(embeddings, {
     pineconeIndex: pineconeIndex as any,
     namespace,
-    ids: vectorIds,
-  } as any);
+  });
+  await vectorStore.addDocuments(documents, { ids: vectorIds });
 
   return { vectorIds, chunks: documents.length };
 }
@@ -81,7 +84,8 @@ export async function ingestContent(
 export async function ingest(
   buffer: Buffer,
   filename: string,
-  adminId: string
+  adminId: string,
+  documentId: string = uuidv4()
 ): Promise<{ chunks: number; vectorIds: string[]; content: string }> {
   // Load PDF from memory buffer
   const pdfData = await pdfParse(buffer);
@@ -141,7 +145,6 @@ export async function ingest(
   if (!validateMinContent(safeText)) {
     throw new Error("PDF has no extractable text content");
   }
-  const documentId = uuidv4();
   const { chunks, vectorIds } = await ingestContent(
     safeText,
     adminId,
@@ -161,14 +164,14 @@ export async function ingest(
 export async function ingestText(
   adminId: string,
   content: string,
-  sourceName: string
+  sourceName: string,
+  documentId: string = uuidv4()
 ): Promise<{ chunks: number; vectorIds: string[] }> {
   const safeContent = validateContentSize(content, sourceName);
   if (!validateMinContent(safeContent)) {
     throw new Error("Text content is too short (min 200 characters)");
   }
 
-  const documentId = uuidv4();
   return ingestContent(safeContent, adminId, {
     source: sourceName,
     type: "text",
@@ -184,7 +187,8 @@ export async function ingestText(
  */
 export async function ingestURL(
   adminId: string,
-  url: string
+  url: string,
+  documentId: string = uuidv4()
 ): Promise<{ chunks: number; vectorIds: string[]; title: string; content: string }> {
   // Fetch the URL
   const response = await axios.get(url, {
@@ -221,7 +225,6 @@ export async function ingestURL(
     );
   }
 
-  const documentId = uuidv4();
   const { chunks, vectorIds } = await ingestContent(
     safeText,
     adminId,
