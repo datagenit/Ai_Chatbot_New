@@ -11,13 +11,65 @@ import axios from "axios";
 import * as cheerio from "cheerio";
 import pdfParse from "pdf-parse/lib/pdf-parse.js";
 import { validateContentSize, validateMinContent } from "./safeguards.js";
-import { env } from "../config/env.js";
+import { env, PINECONE_NS_PREFIX } from "../config/env.js";
 
 const pinecone = new PineconeClient({ apiKey: env.PINECONE_API_KEY });
 
 const embeddings = new HuggingFaceTransformersEmbeddings({
   model: "Xenova/all-MiniLM-L6-v2",
 });
+
+export async function ingestContent(
+  text: string,
+  adminId: string,
+  metadata: { source: string; type: "pdf" | "text" | "url"; documentId: string; title?: string },
+  existingVectorIds?: string[]
+): Promise<{ vectorIds: string[]; chunks: number }> {
+  const textSplitter = new RecursiveCharacterTextSplitter({
+    chunkSize: 1500,
+    chunkOverlap: 150,
+    separators: ["\n\n", "\n", ". ", "! ", "? ", " ", ""],
+  });
+
+  let rawChunks = await textSplitter.splitText(text);
+  if (rawChunks.length > 100) {
+    console.warn("[ingest] chunks capped at 100");
+    rawChunks = rawChunks.slice(0, 100);
+  }
+
+  const totalChunks = rawChunks.length;
+  const documents = rawChunks.map(
+    (chunkText, index) =>
+      new Document({
+        pageContent: `[Source: ${metadata.title ?? metadata.source} | Part ${index + 1} of ${totalChunks}]\n\n${chunkText}`,
+        metadata: {
+          adminId,
+          source: metadata.source,
+          type: metadata.type,
+          documentId: metadata.documentId,
+          ...(metadata.title ? { title: metadata.title } : {}),
+          chunkIndex: index,
+        },
+      })
+  );
+
+  const namespace = `${PINECONE_NS_PREFIX}kb_${adminId}`;
+  const pineconeIndex = pinecone.Index(env.PINECONE_INDEX_NAME);
+
+  if (existingVectorIds?.length) {
+    await pineconeIndex.namespace(namespace).deleteMany(existingVectorIds);
+  }
+
+  const vectorIds = documents.map(() => uuidv4());
+
+  await PineconeStore.fromDocuments(documents, embeddings, {
+    pineconeIndex: pineconeIndex as any,
+    namespace,
+    ids: vectorIds,
+  } as any);
+
+  return { vectorIds, chunks: documents.length };
+}
 
 /**
  * Ingests a PDF file into Pinecone for a specific admin.
@@ -89,52 +141,14 @@ export async function ingest(
   if (!validateMinContent(safeText)) {
     throw new Error("PDF has no extractable text content");
   }
-  const mergedDocuments = [
-    new Document({
-      pageContent: safeText,
-      metadata: documents[0]?.metadata ?? {},
-    }),
-  ];
+  const documentId = uuidv4();
+  const { chunks, vectorIds } = await ingestContent(
+    safeText,
+    adminId,
+    { source: filename, type: "pdf", documentId }
+  );
 
-  // Split into chunks
-  const textSplitter = new RecursiveCharacterTextSplitter({
-    chunkSize: 1500,
-    chunkOverlap: 150,
-    separators: ["\n\n", "\n", ". ", "! ", "? ", " ", ""],
-  });
-  let chunks = await textSplitter.splitDocuments(mergedDocuments);
-  if (chunks.length > 100) {
-    console.warn("[ingest] PDF chunks capped at 100");
-    chunks = chunks.slice(0, 100);
-  }
-
-  // Tag metadata
-  const totalChunks = chunks.length;
-  const taggedChunks = chunks.map((chunk, index) => ({
-    ...chunk,
-    pageContent: `[Source: ${filename} | Part ${index + 1} of ${totalChunks}]\n\n${chunk.pageContent}`,
-    metadata: {
-      ...chunk.metadata,
-      adminId,
-      source: filename,
-      type: "pdf",
-      chunkIndex: index,
-      page: chunk.metadata.pageNumber ?? 0,
-    },
-  }));
-
-  const namespace = `kb_${adminId}`;
-  const pineconeIndex = pinecone.Index(env.PINECONE_INDEX_NAME);
-  const vectorIds = chunks.map(() => uuidv4());
-
-  // Upsert into admin's namespace
-  await PineconeStore.fromDocuments(taggedChunks, embeddings, {
-    pineconeIndex: pineconeIndex as any,
-    namespace,
-    ids: vectorIds,
-  } as any);
-
-  return { chunks: chunks.length, vectorIds, content: safeText };
+  return { chunks, vectorIds, content: safeText };
 }
 
 /**
@@ -154,38 +168,12 @@ export async function ingestText(
     throw new Error("Text content is too short (min 200 characters)");
   }
 
-  const textSplitter = new RecursiveCharacterTextSplitter({
-    chunkSize: 1500,
-    chunkOverlap: 150,
-    separators: ["\n\n", "\n", ". ", "! ", "? ", " ", ""],
+  const documentId = uuidv4();
+  return ingestContent(safeContent, adminId, {
+    source: sourceName,
+    type: "text",
+    documentId,
   });
-
-  let rawChunks = await textSplitter.splitText(safeContent);
-  if (rawChunks.length > 100) {
-    console.warn("[ingest] Text chunks capped at 100");
-    rawChunks = rawChunks.slice(0, 100);
-  }
-
-  const totalChunks = rawChunks.length;
-  const documents = rawChunks.map(
-    (text, index) =>
-      new Document({
-        pageContent: `[Source: ${sourceName} | Part ${index + 1} of ${totalChunks}]\n\n${text}`,
-        metadata: { adminId, source: sourceName, type: "text", chunkIndex: index },
-      })
-  );
-
-  const namespace = `kb_${adminId}`;
-  const pineconeIndex = pinecone.Index(env.PINECONE_INDEX_NAME);
-  const vectorIds = documents.map(() => uuidv4());
-
-  await PineconeStore.fromDocuments(documents, embeddings, {
-    pineconeIndex: pineconeIndex as any,
-    namespace,
-    ids: vectorIds,
-  } as any);
-
-  return { chunks: documents.length, vectorIds };
 }
 
 /**
@@ -233,37 +221,12 @@ export async function ingestURL(
     );
   }
 
-  // Split into chunks
-  const textSplitter = new RecursiveCharacterTextSplitter({
-    chunkSize: 1500,
-    chunkOverlap: 150,
-    separators: ["\n\n", "\n", ". ", "! ", "? ", " ", ""],
-  });
-
-  let rawChunks = await textSplitter.splitText(safeText);
-  if (rawChunks.length > 100) {
-    console.warn("[ingestURL] chunks capped at 100");
-    rawChunks = rawChunks.slice(0, 100);
-  }
-
-  const totalChunks = rawChunks.length;
-  const documents = rawChunks.map(
-    (chunkText, index) =>
-      new Document({
-        pageContent: `[Source: ${title} | Part ${index + 1} of ${totalChunks}]\n\n${chunkText}`,
-        metadata: { adminId, source: url, title, type: "url", chunkIndex: index },
-      })
+  const documentId = uuidv4();
+  const { chunks, vectorIds } = await ingestContent(
+    safeText,
+    adminId,
+    { source: url, type: "url", documentId, title }
   );
 
-  const namespace = `kb_${adminId}`;
-  const pineconeIndex = pinecone.Index(env.PINECONE_INDEX_NAME);
-  const vectorIds = documents.map(() => uuidv4());
-
-  await PineconeStore.fromDocuments(documents, embeddings, {
-    pineconeIndex: pineconeIndex as any,
-    namespace,
-    ids: vectorIds,
-  } as any);
-
-  return { chunks: documents.length, vectorIds, title, content: safeText };
+  return { chunks, vectorIds, title, content: safeText };
 }

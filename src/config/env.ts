@@ -28,4 +28,6 @@ export const env = {
   INTERNAL_SERVER_IP: process.env["INTERNAL_SERVER_IP"]
 } as const;
 
+export const PINECONE_NS_PREFIX = process.env.PINECONE_NS_PREFIX ?? "";
+
 export type Env = typeof env;

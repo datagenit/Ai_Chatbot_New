@@ -3,7 +3,7 @@ import { Pinecone as PineconeClient } from "@pinecone-database/pinecone";
 import { PineconeStore } from "@langchain/pinecone";
 import { HuggingFaceTransformersEmbeddings } from 
 "@langchain/community/embeddings/huggingface_transformers";
-import { env } from "../config/env.js";
+import { env, PINECONE_NS_PREFIX } from "../config/env.js";
 
 const pinecone = new PineconeClient({ apiKey: env.PINECONE_API_KEY });
 
@@ -25,7 +25,7 @@ export async function retrieve(
   maxResults: number = 5,
   documentIds?: string[]
 ): Promise<string> {
-  const namespace = `kb_${adminId}`;
+  const namespace = `${PINECONE_NS_PREFIX}kb_${adminId}`;
 
   try {
     const pineconeIndex = pinecone.Index(env.PINECONE_INDEX_NAME);
@@ -52,7 +52,7 @@ export async function retrieve(
   }
 }
 export async function deleteVectors(adminId: string, vectorIds: string[]): Promise<void> {
-  const namespace = `kb_${adminId}`;
+  const namespace = `${PINECONE_NS_PREFIX}kb_${adminId}`;
   const pineconeIndex = pinecone.Index(env.PINECONE_INDEX_NAME);
   const namespacedIndex = pineconeIndex.namespace(namespace);
   await namespacedIndex.deleteMany(vectorIds);

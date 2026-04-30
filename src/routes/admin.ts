@@ -1,7 +1,7 @@
 import { Router, Response } from "express";
 import multer from "multer";
 import path from "path";
-import { ingest, ingestText, ingestURL } from "../ingestion/ingest.js";
+import { ingest, ingestContent, ingestText, ingestURL } from "../ingestion/ingest.js";
 import {
   validateURL,
   checkDuplicateSource,
@@ -263,6 +263,50 @@ router.get("/documents/:id", async (req: AuthRequest, res: Response) => {
     res.status(500).json({
       success: false,
       error: err instanceof Error ? err.message : "Failed to fetch document",
+    });
+  }
+});
+
+// ── PATCH /api/admin/documents/:id ───────────────────────────────────────────
+router.patch("/documents/:id", async (req: AuthRequest, res: Response) => {
+  try {
+    const adminId = req.adminId!;
+    const { content } = req.body as { content?: string };
+
+    if (!content || !content.trim()) {
+      res.status(400).json({ success: false, error: "Content is required" });
+      return;
+    }
+
+    const doc = await UploadedFile.findOne({ _id: req.params.id, adminId });
+    if (!doc) {
+      res.status(404).json({ success: false, error: "Document not found" });
+      return;
+    }
+
+    const nextContent = content.trim();
+    const source = doc.type === "url" ? doc.filePath : doc.originalName;
+    const metadata = {
+      source,
+      type: doc.type,
+      documentId: String(doc._id),
+      ...(doc.type === "url" ? { title: doc.originalName } : {}),
+    } as const;
+
+    const { chunks, vectorIds } = await ingestContent(nextContent, adminId, metadata, doc.vectorIds);
+
+    const updatedDoc = await UploadedFile.findOneAndUpdate(
+      { _id: req.params.id, adminId },
+      { $set: { content: nextContent, vectorIds, chunks, updatedAt: new Date() } as any },
+      { new: true }
+    );
+
+    res.status(200).json({ success: true, doc: updatedDoc });
+  } catch (err) {
+    console.error("PATCH /documents/:id error:", err);
+    res.status(500).json({
+      success: false,
+      error: err instanceof Error ? err.message : "Failed to update document",
     });
   }
 });
